@@ -1,0 +1,41 @@
+[project]
+name = "bbvastl80"
+version = "0.1.0"
+description = "Rent a Vast.ai GPU, run your stack on it, benchmark with BetterBench, publish with L80."
+authors = [{ name = "launch80", email = "team@launch80.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "rich>=13.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+bbvastl80 = "bbvastl80.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bbvastl80"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

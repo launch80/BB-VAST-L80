@@ -1,0 +1,251 @@
+"""The run spec — the single flexible knob that drives a whole run.
+
+Everything is optional-with-defaults so a 3-line spec works, and a long one
+does too. The :class:`ServingSpec` is the pluggable-provider contract (§2.1 of
+PLAN.md): ``mode: engine`` (a preset) or ``mode: custom`` (your own stack).
+Both reduce to the same goal — *the box serves ``model_id`` at an
+OpenAI-compatible ``/v1`` on ``port``* — so the downstream phases
+(connect / bench / publish) are identical for either.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+
+# --- GPU selection -----------------------------------------------------------
+class GPUFilter(BaseModel):
+    """What GPU to rent. Omit everything to get 'cheapest that exists'."""
+
+    names: list[str] | None = Field(
+        None, description="gpu_name values, e.g. ['H100_SXM5', 'A100_SXM4_80GB']"
+    )
+    count: int = Field(1, description="number of GPUs (num_gpus)")
+    min_ram_gb: float | None = Field(None, description="min total GPU RAM in GB")
+    max_dph: float | None = Field(None, description="max price, dollars per hour")
+    type: Literal["ondemand", "bid", "reserved"] | None = None
+    verified: bool | None = None
+    min_reliability: float | None = Field(None, ge=0.0, le=1.0)
+    datacenter: str | None = None
+    geolocation: str | None = None
+    pick: str = Field("cheapest", description="cheapest | first | <1-based index>")
+    limit: int = Field(40, ge=1, le=200)
+
+
+# --- Model -------------------------------------------------------------------
+class ModelSpec(BaseModel):
+    id: str = Field(..., description="the model id requested at /v1 (for BetterBench)")
+    source: Literal["hf", "url", "local-path"] = "hf"
+    hf_repo: str | None = None
+    url: str | None = None
+
+    @model_validator(mode="after")
+    def _source_has_target(self) -> "ModelSpec":
+        if self.source == "hf" and not self.hf_repo:
+            raise ValueError("model.source=hf requires model.hf_repo")
+        if self.source == "url" and not self.url:
+            raise ValueError("model.source=url requires model.url")
+        return self
+
+
+# --- Serving (the pluggable provider) ---------------------------------------
+class EngineServing(BaseModel):
+    """mode: engine — a preset. We generate install + launch for you."""
+
+    engine: Literal["vllm", "llamacpp", "sglang", "tgi", "ollama"]
+    image: str | None = Field(None, description="override the preset's default image")
+    max_model_len: int | None = None
+    gpu_mem_util: float | None = Field(None, ge=0.1, le=1.0)
+    extra_args: list[str] = Field(default_factory=list)
+
+
+class HealthSpec(BaseModel):
+    path: str = "/v1/models"
+    expects: str | None = Field(
+        None, description="substring that must appear; null => matches serving.model_id"
+    )
+
+
+class WeightsSpec(BaseModel):
+    """Lean: how weights reach the box. (hf / url / none; 'scp' is a later milestone.)"""
+
+    source: Literal["hf", "url", "none"] = "none"
+    repo: str | None = Field(None, description="HF repo id, or a URL when source=url")
+
+
+class CustomServing(BaseModel):
+    """mode: custom — your own stack. Only ``image`` + ``start`` are required."""
+
+    image: str
+    setup: list[str] = Field(
+        default_factory=list,
+        description="shell commands run in-container before start (git pull, pip, fetch weights…)",
+    )
+    start: str = Field(..., description="command that launches the server (runs in foreground)")
+    health: HealthSpec = Field(default_factory=HealthSpec)
+    weights: WeightsSpec = Field(default_factory=WeightsSpec)
+
+
+class ServingSpec(BaseModel):
+    mode: Literal["engine", "custom"] = "engine"
+    port: int = 8000
+    model_id: str | None = Field(
+        None, description="id served at /v1; defaults to model.id"
+    )
+    engine: EngineServing | None = None
+    custom: CustomServing | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_mode(cls, data):
+        # Let a user omit `mode` and just give the block they mean.
+        if isinstance(data, dict) and data.get("mode") is None:
+            if data.get("custom") is not None:
+                data["mode"] = "custom"
+        return data
+
+    @model_validator(mode="after")
+    def _mode_matches_block(self) -> "ServingSpec":
+        if self.mode == "engine" and self.engine is None:
+            # A minimal spec (just `model:`) should work: default to the vLLM preset.
+            self.engine = EngineServing(engine="vllm")
+        if self.mode == "custom" and self.custom is None:
+            raise ValueError("serving.mode=custom requires the serving.custom block")
+        return self
+
+    def resolved_model_id(self, model: ModelSpec) -> str:
+        return self.model_id or model.id
+
+
+# --- Instance ----------------------------------------------------------------
+class InstanceSpec(BaseModel):
+    disk_gb: int = Field(200, ge=1)
+    runtype: Literal["ssh", "ssh_direct", "ssh_proxy", "jupyter", "args"] = "ssh"
+    label: str = "bbvastl80"
+    onstart: str | None = None
+    price: float | None = Field(None, description="bid price $/hr (mode: bid offers only)")
+
+
+# --- Benchmark ---------------------------------------------------------------
+class BenchmarkSpec(BaseModel):
+    quick: bool = False
+    passes: int = Field(20, ge=1)
+    warmup: int = Field(2, ge=0)
+    phases: list[Literal["decode", "prefill", "concurrency"]] = Field(
+        default_factory=lambda: ["decode", "prefill", "concurrency"]
+    )
+    notes: dict[str, str] = Field(default_factory=dict)
+
+
+# --- Publish -----------------------------------------------------------------
+class PublishSpec(BaseModel):
+    template: Literal["bench.betterbench.v1", "bench.report.v1"] = "bench.betterbench.v1"
+    title: str | None = None
+    summary: str | None = None
+    sections: list[str] = Field(default_factory=list, description='"Heading=Body"')
+    dry_run: bool = False
+
+
+# --- Budget / connect / lifecycle -------------------------------------------
+class BudgetSpec(BaseModel):
+    max_total_usd: float | None = Field(None, ge=0)
+    max_provision_min: float = Field(20.0, ge=1)
+
+
+class ConnectSpec(BaseModel):
+    mode: Literal["auto", "direct", "tunnel"] = "auto"
+    local_port: int = 8000
+
+
+class SSHSpec(BaseModel):
+    public_key: str | None = Field(None, description="null => use the account's key")
+
+
+class LifecycleSpec(BaseModel):
+    teardown: Literal["auto", "manual"] = "auto"
+    keep_running: bool = False
+
+
+# --- Top-level ---------------------------------------------------------------
+class RunSpec(BaseModel):
+    name: str | None = None
+    gpu: GPUFilter = Field(default_factory=GPUFilter)
+    model: ModelSpec
+    serving: ServingSpec = Field(default_factory=ServingSpec)
+    instance: InstanceSpec = Field(default_factory=InstanceSpec)
+    benchmark: BenchmarkSpec = Field(default_factory=BenchmarkSpec)
+    publish: PublishSpec = Field(default_factory=PublishSpec)
+    budget: BudgetSpec = Field(default_factory=BudgetSpec)
+    connect: ConnectSpec = Field(default_factory=ConnectSpec)
+    ssh: SSHSpec = Field(default_factory=SSHSpec)
+    lifecycle: LifecycleSpec = Field(default_factory=LifecycleSpec)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_subblocks(cls, data):
+        # A YAML key present but empty (``ssh:`` with only comments) parses as
+        # null; treat it as an empty block so the sub-model's defaults apply.
+        subblocks = ("gpu", "model", "serving", "instance", "benchmark",
+                     "publish", "budget", "connect", "ssh", "lifecycle")
+        if isinstance(data, dict):
+            for key in subblocks:
+                if data.get(key) is None:
+                    data[key] = {}
+        return data
+
+    @model_validator(mode="after")
+    def _defaults(self) -> "RunSpec":
+        if self.serving.model_id is None:
+            self.serving.model_id = self.model.id
+        return self
+
+
+def load_spec(path: str | Path) -> RunSpec:
+    """Load + validate a YAML run spec. Raises :class:`SpecError` with details."""
+    path = Path(path)
+    if not path.exists():
+        raise SpecError(f"spec file not found: {path}")
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        raise SpecError(f"could not parse {path} as YAML: {e}") from e
+    try:
+        return RunSpec.model_validate(raw)
+    except ValidationError as e:
+        raise SpecError(_format_validation_error(e)) from e
+
+
+class SpecError(Exception):
+    """A user-fixible problem with the run spec."""
+
+
+def _format_validation_error(e: ValidationError) -> str:
+    lines = ["spec is invalid:"]
+    for err in e.errors():
+        loc = ".".join(str(x) for x in err["loc"])
+        lines.append(f"  - {loc}: {err['msg']}")
+    return "\n".join(lines)
+
+
+__all__ = [
+    "RunSpec",
+    "SpecError",
+    "load_spec",
+    "GPUFilter",
+    "ModelSpec",
+    "ServingSpec",
+    "EngineServing",
+    "CustomServing",
+    "HealthSpec",
+    "WeightsSpec",
+    "InstanceSpec",
+    "BenchmarkSpec",
+    "PublishSpec",
+    "BudgetSpec",
+    "ConnectSpec",
+    "SSHSpec",
+    "LifecycleSpec",
+]

@@ -1,0 +1,97 @@
+# run.example.yaml — a fully-commented starter spec for bbvastl80.
+#
+# Two shapes are supported for `serving`:
+#   * mode: engine  — pick a preset (vllm/llamacpp/sglang/tgi/ollama); we do the rest
+#   * mode: custom  — bring your own image + setup + start command
+#
+# Copy this to `run.yaml`, edit, then:
+#   bbvastl80 search -s run.yaml
+#   bbvastl80 rent   -s run.yaml
+# (M3+ adds: serve / provision / connect / bench / publish / run)
+
+name: example-run
+
+gpu:
+  names: [H100_SXM5, A100_SXM4_80GB]   # gpu_name filter (cheapest of these)
+  count: 1                                # num_gpus
+  min_ram_gb: 80                          # min total GPU RAM
+  max_dph: 3.0                            # $/hr ceiling
+  type: ondemand                          # ondemand | bid | reserved
+  verified: true
+  min_reliability: 0.99
+  # datacenter: US                        # optional pin
+  # geolocation: "United States"          # optional pin
+  pick: cheapest                          # cheapest | first | <1-based index>
+  limit: 40
+
+model:
+  id: Qwen/Qwen3-27B                      # what BetterBench requests at /v1
+  source: hf
+  hf_repo: Qwen/Qwen3.8-27B-GPTQ-Int4-sym-G128-MTP-BF16
+
+# ---- OPTION A: a preset engine (we generate install + launch) --------------
+serving:
+  mode: engine
+  port: 8000
+  engine:
+    engine: vllm
+    # image: ghcr.io/vllm/vllm-openai:latest   # override the preset image
+    max_model_len: 8192
+    gpu_mem_util: 0.90
+    # extra_args: ["--tensor-parallel-size", "2"]
+
+# ---- OPTION B: your own custom stack (the "offload my setup" path) ---------
+# serving:
+#   mode: custom
+#   port: 8000
+#   model_id: my-model
+#   custom:
+#     image: your-registry/your-stack:latest   # a full image, OR a base to provision
+#     setup:                                    # shell cmds run in-container before start
+#       - "pip install -r /app/requirements.txt"
+#       - "huggingface-cli download $MODEL_REPO --local-dir /models"
+#     start: "python /app/serve.py --port 8000 --model /models"
+#     health:
+#       path: /v1/models
+#       expects: my-model
+#     weights:
+#       source: hf                            # hf | url | none
+#       repo: your-org/your-quant
+
+instance:
+  disk_gb: 200
+  runtype: ssh                              # ssh | ssh_direct | ssh_proxy
+  label: bbvastl80
+  # onstart: "echo provisioning"            # optional extra boot command
+  # price: 1.5                              # bid $/hr (for gpu.type: bid)
+
+benchmark:
+  quick: false
+  passes: 20
+  warmup: 2
+  phases: [decode, prefill, concurrency]
+  notes:
+    engine: vllm
+    hardware: H100
+
+publish:
+  template: bench.betterbench.v1
+  # title: null
+  # summary: null
+  # sections: ["Notes=ran on rented H100"]
+  dry_run: false
+
+budget:
+  max_total_usd: 10.0
+  max_provision_min: 20
+
+connect:
+  mode: auto                                # auto | direct | tunnel
+  local_port: 8000
+
+ssh:
+  # public_key: "ssh-ed25519 AAAA… you"     # null => use the account's key
+
+lifecycle:
+  teardown: auto                            # auto | manual
+  keep_running: false
