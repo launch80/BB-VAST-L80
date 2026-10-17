@@ -165,3 +165,22 @@ def test_cost_guard(env, client, router):
         return_value=MockResponse(200, content=json.dumps({"id": 1, "credit": 5.0})))
     with pytest.raises(rp.PipelineError, match="balance"):
         rp.run_pipeline(env["cfg"], spec(), client)
+
+
+def test_rent_fails_over_when_host_cannot_start_container(env, client, router):
+    dead = {"id": 777, "actual_status": "created", "intended_status": "stopped",
+            "status_msg": "Error response from daemon: nvidia-container-cli: device error"}
+    router.get(f"{BASE}/instances/777").mock(
+        return_value=MockResponse(200, content=json.dumps({"instances": dead})))
+    destroyed_777 = router.delete(f"{BASE}/instances/777").mock(
+        return_value=MockResponse(200, content="{}"))
+    good = dict(INSTANCE, id=778)
+    router.put(f"{BASE}/asks/12/").mock(
+        return_value=MockResponse(200, content=json.dumps({"success": True, "new_contract": 778})))
+    router.get(f"{BASE}/instances/778").mock(
+        return_value=MockResponse(200, content=json.dumps({"instances": good})))
+    router.post(f"{BASE}/instances/778/ssh/").mock(return_value=MockResponse(200, content="{}"))
+    router.delete(f"{BASE}/instances/778").mock(return_value=MockResponse(200, content="{}"))
+    st = rp.run_pipeline(env["cfg"], spec(), client, up_to="rent")
+    assert destroyed_777.called            # the dead box was torn down
+    assert st.instance_id == 778 and st.offer_id == 12 and st.status == "rented"

@@ -463,13 +463,19 @@ the "all requests failed → don't publish" guard.
   registration; commands `provision`, `ssh`, `logs`. ✅ built (59 tests);
   **needs one live rent→serve run to validate** (the execute-endpoint design it
   replaces was a dead end — see §4 step 6).
-- **M4 — connect.** `connect.py`: direct + tunnel, `ssh -F` config, `/v1`
-  verification, clean shutdown; command `connect`.
-- **M5 — bench + publish.** `bench.py` (spawn pinned harness + validation
-  guard), `publish.py` (spawn L80, parse URL); commands `bench`, `publish`.
-- **M6 — the pipeline.** `run.py` wiring all phases with state/resume,
-  `--up-to`, `--dry-run`, `--keep`, `--offer/--instance`; end-to-end test
-  against the fakes.
+- **M4 — connect.** `connect.py`: direct public port when it answers, else a
+  background `ssh -N -L` tunnel (pid in state, closed by `destroy --run`);
+  `/v1` verified (model id listed) before anything uses it; command `connect`.
+  ✅ built
+- **M5 — bench + publish.** `bench.py` (spawn pinned harness with the real
+  0.4.0 flags + the never-publish-zeros guard), `publish.py` (`l80 betterbench
+  --results … --json`, URL parsed); commands `bench`, `publish`. ✅ built
+- **M6 — the pipeline.** `run.py`: rent → provision → connect → bench →
+  publish → reap with state, `--up-to`, `--dry-run`, `--keep`,
+  `--publish-dry-run`, `--offer/--instance`; teardown after a successful
+  publish and on failure (unless `--keep`); cost estimate. End-to-end tested
+  against respx + fake `betterbench`/`l80` binaries (80 tests). ✅ built —
+  first real run: `specs/swift-qwen3.8-27b-int4-2xh200nvl.yaml`.
 - **M7 — polish.** README, `run.example.yaml`, richer error messages, cost
   reporting, sglang/tgi/ollama engines, interruptible (`bid`) pricing path.
 

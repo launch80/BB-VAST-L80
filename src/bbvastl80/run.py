@@ -26,7 +26,7 @@ from bbvastl80.publish import PublishError, run_publish
 from bbvastl80.spec import RunSpec
 from bbvastl80.state import RunState, StateStore
 from bbvastl80.vast.client import VastClient, VastError
-from bbvastl80.vast.instance import ProvisionError, rent as rent_box, wait_for_running
+from bbvastl80.vast.instance import HostError, ProvisionError, rent as rent_box, wait_for_running
 from bbvastl80.vast.models import Instance, Offer
 from bbvastl80.vast.offers import build_search_body, rank_offers
 from bbvastl80.vast.sshkeys import (
@@ -79,35 +79,51 @@ def rent_phase(cfg: Config, spec: RunSpec, c: VastClient, offer_id: int | None,
         if not candidates:
             raise PipelineError("no offer selected")
 
-    chosen, instance_id, last_err = None, None, None
+    store = StateStore(cfg.runs_dir)
+    run_id = store.new_run_id(name or spec.name)
+    state = RunState(run_id=run_id, status="renting", spec_name=spec.name)
+    chosen, inst, last_err = None, None, None
     for cand in candidates[:8]:
         price = f" ${cand.dph_total:.3f}/hr" if cand.dph_total is not None else ""
         log.info(f"renting offer {cand.id} ({cand.label}{price})")
         try:
             instance_id = rent_box(c, cand, spec.serving, spec.instance, bootstrap)
-            chosen = cand
-            break
         except VastError as e:
             last_err = e
             log.detail(f"  offer {cand.id} not rentable ({' '.join(str(e).split())[:90]}) — next")
-    if instance_id is None or chosen is None:
-        raise PipelineError(f"no offer could be rented ({len(candidates)} tried): {last_err}")
-
-    store = StateStore(cfg.runs_dir)
-    run_id = store.new_run_id(name or spec.name)
-    state = RunState(run_id=run_id, status="rented", spec_name=spec.name,
-                     offer_id=chosen.id, offer_label=chosen.label, instance_id=instance_id,
-                     dph=chosen.dph_total, started_billing_at=time.time())
-    store.save(state)  # save *before* waiting so a crash still knows the box
-    log.info(f"instance {instance_id} created (run {run_id}) — waiting up to "
-             f"{spec.budget.max_provision_min:.0f} min for it to run…")
-    try:
-        inst = wait_for_running(c, instance_id, timeout_min=spec.budget.max_provision_min)
-    except ProvisionError as e:
+            continue
+        # save *before* waiting so a crash still knows the box
+        state.status, state.offer_id, state.offer_label = "rented", cand.id, cand.label
+        state.instance_id, state.dph, state.started_billing_at = instance_id, cand.dph_total, time.time()
+        store.save(state)
+        log.info(f"instance {instance_id} created (run {run_id}) — waiting up to "
+                 f"{spec.budget.max_provision_min:.0f} min for it to run…")
+        try:
+            inst = wait_for_running(c, instance_id, timeout_min=spec.budget.max_provision_min)
+            chosen = cand
+            break
+        except HostError as e:
+            # The host is broken, not us: destroy the dead box, try the next offer.
+            last_err = e
+            log.warn(f"{e}\n  destroying {instance_id} and trying the next offer")
+            try:
+                c.destroy_instance(instance_id)
+            except VastError as de:
+                log.error(f"could not destroy {instance_id}: {de} — run "
+                          f"`bbvastl80 destroy --instance {instance_id} --yes`")
+            state.status, state.instance_id = "host_error", None
+            store.save(state)
+        except ProvisionError as e:
+            state.status = "failed"
+            store.save(state)
+            raise PipelineError(f"{e}\n(the instance may still be starting; re-check with "
+                                f"`bbvastl80 status --instance {instance_id}`)") from e
+    if chosen is None or inst is None or state.instance_id is None:
         state.status = "failed"
         store.save(state)
-        raise PipelineError(f"{e}\n(the instance may still be starting; re-check with "
-                            f"`bbvastl80 status --instance {instance_id}`)") from e
+        raise PipelineError(f"no offer could be rented and started "
+                            f"({min(len(candidates), 8)} tried): {last_err}")
+    instance_id = state.instance_id
     attach_key(c, instance_id, pub)
     record_instance(state, inst, spec)
     store.save(state)

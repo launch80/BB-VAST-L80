@@ -78,6 +78,9 @@ class Instance(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     id: int | None = None
     status: str | None = Field(default=None, validation_alias="actual_status")
+    intended_status: str | None = None   # what Vast is steering toward (running/stopped)
+    cur_state: str | None = None
+    status_msg: str | None = None        # host/daemon message (errors land here)
     type: int | str | None = None  # instance-type code (int) or label
     public_ip: str | None = Field(default=None, validation_alias="public_ipaddr")
     ip: str | None = None
@@ -100,6 +103,26 @@ class Instance(BaseModel):
     @property
     def is_terminal_failed(self) -> bool:
         return (self.status or "").lower() in TERMINAL_FAIL
+
+    @property
+    def host_error(self) -> str | None:
+        """The host's failure message when it gave up starting the container.
+
+        Seen live: ``actual_status: created`` forever, ``intended_status:
+        stopped`` and a ``status_msg`` like "Error response from daemon: …
+        nvidia-container-cli: device error". Polling can't fix that; the
+        caller should destroy the instance and rent the next offer.
+        """
+        if self.is_running:
+            return None
+        msg = (self.status_msg or "").strip()
+        stopped = (self.intended_status or "").lower() == "stopped" or \
+            (self.cur_state or "").lower() == "stopped"
+        looks_bad = any(t in msg.lower() for t in
+                        ("error", "failed", "unable to", "no such", "exit status"))
+        if stopped and (looks_bad or (self.status or "").lower() == "created"):
+            return msg or f"host stopped the instance while '{self.status}'"
+        return None
 
     @property
     def host_ip(self) -> str | None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from respx.models import MockResponse
 
 from conftest import BASE
@@ -98,3 +100,21 @@ def test_external_port_prefers_env():
     inst = Instance(id=1, status="running", public_ip="1.2.3.4",
                     env={"VAST_TCP_PORT_8000": "60000"}, ports={"8000": 44321})
     assert inst.external_port(8000) == 60000  # env wins
+
+
+def test_host_error_detected_and_wait_raises(client, router):
+    from bbvastl80.vast.instance import HostError
+    dead = {"id": 9, "actual_status": "created", "intended_status": "stopped",
+            "cur_state": "stopped",
+            "status_msg": "Error response from daemon: ... nvidia-container-cli: device error"}
+    assert "nvidia-container-cli" in Instance(**dead).host_error
+    assert Instance(id=1, actual_status="loading", intended_status="running",
+                    status_msg="Pulling image").host_error is None
+    assert Instance(id=1, actual_status="running", intended_status="stopped",
+                    status_msg="Error x").host_error is None
+    router.get(f"{BASE}/instances/9").mock(
+        return_value=MockResponse(200, content=js({"instances": dead})))
+    import bbvastl80.vast.instance as vi
+    vi.time.sleep = lambda s: None
+    with pytest.raises(HostError, match="could not start instance 9"):
+        wait_for_running(client, 9, timeout_min=1)

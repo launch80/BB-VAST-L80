@@ -12,13 +12,14 @@ engine-agnostic.
 
 ## Status
 
-**Built (M0–M3):** project skeleton, config/doctor, the read-only Vast surface
+**Built (M0–M6):** project skeleton, config/doctor, the read-only Vast surface
 (`search`, `list`, `status`), the rent/teardown lifecycle (`rent`, `destroy`,
 `reap`) with per-run state for resumability, and provisioning (`serve`,
 `provision`, `ssh`, `logs`): the provider renders one idempotent bootstrap
-script that ships as the instance's `onstart` and is also pushed over SSH. The
-remaining pipeline commands (`connect`, `bench`, `publish`, `run`) are stubs
-so the CLI surface is stable; they light up in M4–M6.
+script that ships as the instance's `onstart` and is also pushed over SSH. `connect`
+resolves a verified `/v1` here (direct port or SSH tunnel), `bench` runs the
+pinned BetterBench, `publish` pushes through L80, and `run` chains it all and
+destroys the box after the publish. See `specs/` for a real run spec.
 
 The Vast client is exercised against the **live API** (search/list/status all
 return clean, actionable errors with a valid key).
@@ -77,10 +78,10 @@ and provision time. `benchmark`/`publish`/`connect`/`lifecycle` round it out.
 | `provision` | bootstrap a running box into serving the model (idempotent) |
 | `ssh`     | open a shell on the box, or run one command |
 | `logs`    | tail the bootstrap + server logs on the box |
-| `connect` | *(M4)* resolve the endpoint (direct port or SSH tunnel) + verify `/v1` |
-| `bench`   | *(M5)* run pinned BetterBench against an endpoint → `results.json` |
-| `publish` | *(M5)* publish a `results.json` via the L80 CLI |
-| `run`     | *(M6)* the full pipeline: serve + bench + publish |
+| `connect` | resolve the endpoint (direct port or SSH tunnel) + verify `/v1` |
+| `bench`   | run pinned BetterBench against an endpoint → validated `results.json` |
+| `publish` | publish a `results.json` via the L80 CLI (validated first) |
+| `run`     | the full pipeline: rent → provision → connect → bench → publish → destroy (`--up-to`, `--dry-run`, `--keep`) |
 
 ## Design notes
 
@@ -124,8 +125,12 @@ src/bbvastl80/
     engines.py      # vLLM / llama.cpp presets
     custom.py       # your image + setup[] + start + health
   bootstrap.py      # render_bootstrap (onstart) + provision (SSH push + wait)
-  # M4+ will add: connect.py (tunnel), bench.py, publish.py, run.py
-tests/              # 59 tests: spec, offers, client (respx), instance, providers,
-                    # bootstrap, sshkeys
+  connect.py        # direct vs tunnel, verify_v1
+  bench.py          # spawn pinned BetterBench + validate_results (never publish zeros)
+  publish.py        # spawn l80, parse the page URL
+  run.py            # the pipeline + teardown policy + cost estimate
+specs/              # real run specs (e.g. 2x H200 NVL quick bench)
+tests/              # 80 tests: spec, offers, client (respx), instance, providers,
+                    # bootstrap, sshkeys, connect, bench/publish, pipeline e2e
 run.example.yaml    # fully-commented starter spec
 ```

@@ -19,6 +19,11 @@ class ProvisionError(Exception):
     """The instance reached a failed terminal state (or we gave up waiting)."""
 
 
+class HostError(ProvisionError):
+    """The host could not start the container (bad GPU driver, etc.). The
+    instance will never run; destroy it and rent a different offer."""
+
+
 def rent_body(offer: Offer, serving: ServingSpec, instance: InstanceSpec,
               bootstrap: str | None = None) -> dict:
     """The ``PUT /asks/{id}/`` payload.
@@ -79,6 +84,10 @@ def wait_for_running(client: VastClient, instance_id: int, *, timeout_min: float
                     f"instance {instance_id} entered failed state '{last.status}' "
                     f"(see 'bbvastl80 status --instance {instance_id}')"
                 )
+            err = last.host_error
+            if err:
+                raise HostError(f"host could not start instance {instance_id}: "
+                                f"{' '.join(err.split())[:300]}")
             log.detail(f"instance {instance_id}: {last.status} …")
         time.sleep(poll_sec)
     raise ProvisionError(
