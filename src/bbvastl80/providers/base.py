@@ -35,6 +35,23 @@ SERVER_LOG = f"{REMOTE_DIR}/server.log"
 SERVER_PID = f"{REMOTE_DIR}/server.pid"
 STATUS_FILE = f"{REMOTE_DIR}/status"
 
+# Seen live: Vast writes the account's key into /root/.ssh/authorized_keys but
+# sshd (StrictModes) refused it — "bad ownership or modes for file
+# /root/.ssh/authorized_keys" — so every login failed. Two belts: relax
+# StrictModes (effective at sshd start, or on HUP if it's already up) and keep
+# the ownership/modes correct for the first ten minutes, which also covers a
+# key attached after boot.
+SSH_HARDENING = [
+    "# --- make sure our SSH key is accepted (StrictModes + perms) ---",
+    "sed -i 's/^#\\?StrictModes.*/StrictModes no/' /etc/ssh/sshd_config 2>/dev/null "
+    "&& grep -q '^StrictModes' /etc/ssh/sshd_config "
+    "|| echo 'StrictModes no' >> /etc/ssh/sshd_config",
+    "kill -HUP $(pidof sshd 2>/dev/null) 2>/dev/null",
+    "(for i in $(seq 1 120); do chown root:root /root/.ssh /root/.ssh/authorized_keys; "
+    "chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; sleep 5; done) "
+    ">/dev/null 2>&1 &",
+]
+
 
 # --- a result from running a command -----------------------------------------
 @dataclass
@@ -262,6 +279,7 @@ class Provider(ABC):
             f"D={REMOTE_DIR}; mkdir -p $D",
             f"exec >>{BOOTSTRAP_LOG} 2>&1",
             'echo "== bbvastl80 bootstrap $(date -u +%FT%TZ)"',
+            *SSH_HARDENING,
             f"if {self.health_cmd(spec)} >/dev/null 2>&1; then "
             f"echo serving >{STATUS_FILE}; echo already serving; exit 0; fi",
             f"if [ -f {SERVER_PID} ] && kill -0 $(cat {SERVER_PID}) 2>/dev/null; then "

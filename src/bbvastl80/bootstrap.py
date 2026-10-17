@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import time
 
+import httpx
+
 from bbvastl80 import log
 from bbvastl80.providers import Box, make_transport, resolve_provider
 from bbvastl80.providers.base import BOOTSTRAP_LOG, BOOTSTRAP_PATH, SERVER_LOG, STATUS_FILE
@@ -88,7 +90,19 @@ def provision(client, inst: Instance, spec: RunSpec, *,
     box = build_box(client, inst, spec)
     log.info(f"provisioning with '{provider.name}' on instance {inst.id} "
              f"(ssh {box.ssh_user}@{box.ssh_host}:{box.ssh_port})")
-    wait_for_ssh(box)
+    try:
+        wait_for_ssh(box)
+    except ProvisionError as e:
+        # No shell — but the onstart bootstrap may still have done its job.
+        # If the public port serves the model, carry on without SSH.
+        if not box.url():
+            raise
+        log.warn(f"{e}\n  no SSH, but the serving port is public — watching "
+                 f"{box.url()}/v1/models instead")
+        _wait_ready_direct(box, spec, ready_timeout_min or spec.budget.max_provision_min)
+        log.success(f"'{provider.name}' is serving '{spec.model.id}' at {box.url()}/v1 "
+                    "(verified from here; no SSH)")
+        return box
     if provider.is_ready(box, spec):
         log.success(f"'{provider.name}' is already serving '{spec.model.id}' at /v1")
         return box
@@ -133,6 +147,36 @@ def _wait_ready(box: Box, spec: RunSpec, provider, timeout_min: float) -> None:
     raise ProvisionError(
         f"server not ready after {timeout_min:.0f} min; inspect with "
         f"`bbvastl80 logs --instance {box.instance_id}`")
+
+
+def direct_ready(box: Box, spec: RunSpec, timeout: float = 8.0) -> bool:
+    """Does the box's *public* port already list the model? (no SSH needed)"""
+    url = box.url()
+    if not url:
+        return False
+    try:
+        r = httpx.get(f"{url}/v1/models", timeout=timeout)
+        if r.status_code != 200:
+            return False
+        ids = [m.get("id") for m in (r.json().get("data") or [])]
+        return spec.serving.resolved_model_id(spec.model) in ids
+    except (httpx.HTTPError, ValueError):
+        return False
+
+
+def _wait_ready_direct(box: Box, spec: RunSpec, timeout_min: float) -> None:
+    deadline = time.monotonic() + timeout_min * 60
+    start = time.monotonic()
+    while time.monotonic() < deadline:
+        if direct_ready(box, spec):
+            log.success(f"server ready in {time.monotonic() - start:.0f}s")
+            return
+        log.detail("waiting for /v1 on the public port …")
+        time.sleep(10)
+    raise ProvisionError(
+        f"server not reachable at {box.url()}/v1 after {timeout_min:.0f} min and no SSH; "
+        "the onstart bootstrap probably failed — rent again with `-v` and check "
+        "`bbvastl80 logs` once SSH works")
 
 
 def _dump_logs(box: Box, n: int = 40) -> None:

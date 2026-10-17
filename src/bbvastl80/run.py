@@ -124,7 +124,6 @@ def rent_phase(cfg: Config, spec: RunSpec, c: VastClient, offer_id: int | None,
         raise PipelineError(f"no offer could be rented and started "
                             f"({min(len(candidates), 8)} tried): {last_err}")
     instance_id = state.instance_id
-    attach_key(c, instance_id, pub)
     record_instance(state, inst, spec)
     store.save(state)
     return store, state, inst
@@ -248,6 +247,11 @@ def run_pipeline(cfg: Config, spec: RunSpec, c: VastClient, *, up_to: str | None
             inst = running_instance(c, instance, spec)
         except (VastError, ProvisionError) as e:
             raise PipelineError(f"instance {instance}: {e}") from e
+        try:
+            attach_key(c, instance, resolve_public_key(spec.ssh.public_key,
+                                                        resolve_identity(spec.ssh.identity)))
+        except ConfigError as e:
+            raise PipelineError(str(e)) from e
         record_instance(state, inst, spec)
         store.save(state)
     else:

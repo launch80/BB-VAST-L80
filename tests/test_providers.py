@@ -191,3 +191,10 @@ def test_resolve_image_default_and_override():
     assert resolve_image(eng) == "vllm/vllm-openai:latest"
     eng2 = ServingSpec(mode="engine", engine={"engine": "vllm", "image": "my/vllm:1"})
     assert resolve_image(eng2) == "my/vllm:1"
+
+
+def test_bootstrap_script_hardens_ssh_before_anything_else():
+    s = VLLMProvider().script(make_spec())
+    i_ssh, i_health = s.index("StrictModes no"), s.index("already serving")
+    assert i_ssh < i_health  # runs even when the server is already up
+    assert "chmod 600 /root/.ssh/authorized_keys" in s and "chmod 700 /root/.ssh" in s
