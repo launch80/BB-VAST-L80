@@ -421,12 +421,19 @@ the "all requests failed → don't publish" guard.
 
 ## 7. Milestones (build order)
 
+> **Status (2025):** M0–M2 are **built, tested (24 tests), pyflakes-clean, and
+> verified against the live Vast API** (search/list/status/rent all return clean
+> errors with a valid key). Live-API findings baked in: `order` is a list of
+> `[field, dir]` tuples, `type` is a plain enum, endpoints 301-redirect to a
+> trailing slash (client follows redirects), and a bad key is a 404 with
+> `{"error":"auth_error"}`. Next up: **M3 (provision)**.
+
 - **M0 — skeleton.** `pyproject`, package layout, `typer` CLI, `config.py`,
-  `spec.py` (full pydantic model + defaults), `init` + `doctor`.
+  `spec.py` (full pydantic model + defaults), `init` + `doctor`. ✅ done
 - **M1 — read-only Vast.** `vast/client.py`, `offers.py`, `models.py`;
-  commands `search`, `list`, `status`. Safe to hit the real API first.
+  commands `search`, `list`, `status`. Safe to hit the real API first. ✅ done
 - **M2 — rent + lifecycle.** `instance.py` (rent, poll, destroy, logs),
-  cost guard; commands `rent`, `destroy`, `reap`.
+  cost guard; commands `rent`, `destroy`, `reap`. ✅ done
 - **M3 — provision.** `engines.py` (vLLM + llama.cpp first), `bootstrap.py`,
   execute-endpoint transport (+SSH fallback); command `provision`.
 - **M4 — connect.** `connect.py`: direct + tunnel, `ssh -F` config, `/v1`
