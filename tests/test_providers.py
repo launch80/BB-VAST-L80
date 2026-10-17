@@ -132,7 +132,7 @@ def test_custom_provider_launch_and_health():
     p.launch(box(t), spec)
     assert t.detached[-1] == "python server.py"
     assert p.is_ready(box(t), spec) is True  # 200 + 'm' present in the body
-    assert t.calls[-1] == "curl -sf localhost:8000/v1/models"
+    assert "curl -sf http://localhost:8000/v1/models" in t.calls[-1]
 
 
 def test_custom_provider_setup_runs_in_order_and_stops_on_failure():
@@ -158,7 +158,7 @@ def test_bootstrap_script_is_idempotent_and_ordered():
     s = CustomProvider().script(spec, extra_onstart=spec.instance.onstart)
     assert s.startswith("#!/bin/bash")
     # exits early when already serving / launching
-    assert "curl -sf localhost:8000/health" in s and "already serving; exit 0" in s
+    assert "curl -sf http://localhost:8000/health" in s and "already serving; exit 0" in s
     assert f"kill -0 $(cat {SERVER_PID})" in s
     # order: user hook -> prepare -> launch
     i_hook, i_prep, i_launch = (s.index("echo user-hook"), s.index("apt-get install -y x"),
@@ -171,9 +171,11 @@ def test_bootstrap_script_is_idempotent_and_ordered():
 
 def test_bootstrap_script_quotes_launch_safely():
     spec = make_spec(serving={"engine": {"engine": "vllm", "extra_args": ["--chat-template", "x y"]}})
+    import shlex
+    launch = VLLMProvider().launch_cmd(spec)
+    assert launch.endswith("--chat-template 'x y'")  # extra args are shell-quoted
     s = VLLMProvider().script(spec)
-    assert "setsid nohup bash -c 'vllm serve org/m" in s
-    assert "--chat-template x y'" in s
+    assert f"setsid nohup bash -c {shlex.quote(launch)} >" in s  # and the whole launch again
 
 
 # --- resolution --------------------------------------------------------------
@@ -186,6 +188,6 @@ def test_resolve_provider_engine_and_custom():
 
 def test_resolve_image_default_and_override():
     eng = ServingSpec(mode="engine", engine={"engine": "vllm"})
-    assert resolve_image(eng).startswith("ghcr.io/vllm")
+    assert resolve_image(eng) == "vllm/vllm-openai:latest"
     eng2 = ServingSpec(mode="engine", engine={"engine": "vllm", "image": "my/vllm:1"})
     assert resolve_image(eng2) == "my/vllm:1"

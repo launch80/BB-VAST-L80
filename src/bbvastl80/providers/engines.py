@@ -13,12 +13,14 @@ onstart / SSH bootstrap script.
 """
 from __future__ import annotations
 
+import shlex
+
 from .base import Provider
 
 
 class VLLMProvider(Provider):
     name = "vllm"
-    DEFAULT_IMAGE = "ghcr.io/vllm/vllm-openai:latest"
+    DEFAULT_IMAGE = "vllm/vllm-openai:latest"  # Docker Hub (ghcr.io has no public image)
 
     def prepare_cmds(self, spec) -> list[str]:
         # The official image ships vLLM; only install if it's a bare image.
@@ -40,7 +42,7 @@ class VLLMProvider(Provider):
             parts.append(f"--max-model-len {eng.max_model_len}")
         if eng.gpu_mem_util:
             parts.append(f"--gpu-memory-utilization {eng.gpu_mem_util}")
-        parts.extend(eng.extra_args or [])
+        parts.extend(shlex.quote(a) for a in (eng.extra_args or []))
         return " ".join(parts)
 
 
@@ -74,7 +76,7 @@ class LLamaCppProvider(Provider):
         ]
         if eng.max_model_len:
             parts.append(f"-c {eng.max_model_len}")
-        parts.extend(eng.extra_args or [])
+        parts.extend(shlex.quote(a) for a in (eng.extra_args or []))
         return " ".join(parts)
 
 

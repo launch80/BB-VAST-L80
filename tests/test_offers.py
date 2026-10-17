@@ -70,3 +70,10 @@ def test_pick_index_out_of_range_raises():
 
 def test_pick_empty():
     assert pick_offer([], "cheapest") is None
+
+
+def test_build_search_body_disk_and_rentable():
+    body = build_search_body(GPUFilter(names=["H200 NVL"], count=2), min_disk_gb=120)
+    assert body["gpu_name"] == {"eq": "H200 NVL"}
+    assert body["disk_space"] == {"gte": 120.0}
+    assert body["rentable"] == {"eq": True}

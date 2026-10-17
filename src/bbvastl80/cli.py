@@ -8,24 +8,29 @@ present as stubs so the surface is stable; they light up in M4–M6.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 from rich.table import Table
 
 from bbvastl80 import __version__, log
-from bbvastl80.bootstrap import build_box, provision as provision_box, render_bootstrap
+from bbvastl80.bench import BenchError, run_bench, validate_results
+from bbvastl80.bootstrap import build_box, provision as provision_box
+from bbvastl80.connect import ConnectError, connect as connect_box, verify_v1
 from bbvastl80.config import CRED_FILE, Config, ConfigError
 from bbvastl80.providers.base import BOOTSTRAP_LOG, SERVER_LOG, STATUS_FILE
-from bbvastl80.spec import RunSpec, SpecError, load_spec
-from bbvastl80.state import RunState, StateStore
-from bbvastl80.vast import VastAuthError, VastClient, VastError
-from bbvastl80.vast.instance import ProvisionError, rent as rent_box, wait_for_running
-from bbvastl80.vast.models import Instance, Offer
-from bbvastl80.vast.offers import build_search_body, pick_offer, rank_offers
-from bbvastl80.vast.sshkeys import (
-    attach_key, ensure_account_key, key_body, resolve_identity, resolve_public_key,
+from bbvastl80.publish import PublishError, run_publish
+from bbvastl80.run import (
+    PHASES, PipelineError, dry_run as pipeline_dry_run, latest_state, rent_phase, run_pipeline,
 )
+from bbvastl80.spec import RunSpec, SpecError, load_spec
+from bbvastl80.state import StateStore
+from bbvastl80.vast import VastAuthError, VastClient, VastError
+from bbvastl80.vast.instance import wait_for_running
+from bbvastl80.vast.models import Instance, Offer
+from bbvastl80.vast.offers import build_search_body, pick_offer
+from bbvastl80.vast.sshkeys import key_body, resolve_identity, resolve_public_key
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
 
@@ -210,7 +215,7 @@ def search(spec: SPEC_OPT = None, verbose: VERBOSE_OPT = False) -> None:
         _fail(str(e))
     with _client(cfg) as c:
         try:
-            offers = c.search_offers(build_search_body(s.gpu))
+            offers = c.search_offers(build_search_body(s.gpu, min_disk_gb=s.instance.disk_gb))
         except VastAuthError as e:
             _fail(str(e))
         except VastError as e:
@@ -295,87 +300,17 @@ def _print_instance(inst: Instance) -> None:
 
 # --- M2: rent / destroy / reap ----------------------------------------------
 def _rent_phase(cfg, s, c, offer):
-    """Cost guard → search → rent (try the next offer on a stale one) → wait for
-    running → save state. Returns ``(store, run_id, state, chosen, instance)``.
-    Shared by ``rent`` and ``serve``."""
-    if s.budget.max_total_usd is not None:
-        try:
-            user = c.get_user()
-        except VastAuthError as e:
-            _fail(str(e))
-        if user.credit is not None and user.credit < s.budget.max_total_usd:
-            _fail(f"balance ${user.credit:.2f} < budget ${s.budget.max_total_usd:.2f}; "
-                  "top up at https://cloud.vast.ai or lower budget.max_total_usd")
-
-    # SSH key first: Vast injects the account's keys at creation time, so the
-    # public half must be registered *before* we rent.
+    """Thin CLI wrapper over :func:`bbvastl80.run.rent_phase` (cost guard → SSH
+    key → search → rent → wait → attach key → save state). Returns
+    ``(store, run_id, state, chosen, instance)`` for ``rent`` and ``serve``."""
     try:
-        ident = resolve_identity(s.ssh.identity)
-        pub = resolve_public_key(s.ssh.public_key, ident)
-        ensure_account_key(c, pub)
-    except ConfigError as e:
-        _fail(str(e))
+        store, state, inst = rent_phase(cfg, s, c, offer)
     except VastAuthError as e:
         _fail(str(e))
-    except VastError as e:
-        _fail(f"could not register the SSH key with Vast: {e}")
-    bootstrap = render_bootstrap(s)
-    if bootstrap:
-        log.detail(f"onstart bootstrap: {len(bootstrap)} bytes "
-                   f"(provider '{s.serving.engine.engine if s.serving.engine else 'custom'}')")
-
-    if offer is not None:
-        candidates = [_offer_from_id(cfg, offer)]
-    else:
-        try:
-            offers = c.search_offers(build_search_body(s.gpu))
-        except VastError as e:
-            _fail(f"search failed: {e}")
-        if not offers:
-            _fail("no offers matched — relax the gpu filter")
-        candidates = rank_offers(offers, s.gpu.pick)
-        if not candidates:
-            _fail("no offer selected")
-
-    chosen, instance_id, last_err = None, None, None
-    for cand in candidates:
-        log.info(f"renting offer {cand.id} ({cand.label})")
-        try:
-            instance_id = rent_box(c, cand, s.serving, s.instance, bootstrap)
-            chosen = cand
-            break
-        except VastAuthError as e:
-            _fail(str(e))  # an auth problem won't clear by trying another offer
-        except VastError as e:
-            last_err = e
-            log.detail(f"  offer {cand.id} not rentable ({' '.join(str(e).split())[:90]}) — trying next")
-    if instance_id is None:
-        _fail(f"no offer could be rented ({len(candidates)} tried): {last_err}")
-
-    log.info(f"instance {instance_id} created — waiting up to "
-             f"{s.budget.max_provision_min:.0f} min for it to run…")
-    try:
-        inst = wait_for_running(c, instance_id, timeout_min=s.budget.max_provision_min)
-    except ProvisionError as e:
-        _fail(f"{e}\n(the instance may still be starting; re-check with "
-              f"`bbvastl80 status --instance {instance_id}`)")
-
-    attach_key(c, instance_id, pub)  # belt and braces for Docker instances
-
-    store = _state_store(cfg)
-    run_id = store.new_run_id(s.name)
-    ports = {str(p): inst.external_port(p) for p in (s.serving.port, 22) if inst.external_port(p)}
-    target = inst.ssh_target()
-    state = RunState(
-        run_id=run_id, status="rented", spec_name=s.name,
-        offer_id=chosen.id, offer_label=chosen.label,
-        instance_id=instance_id, instance_status=inst.status,
-        public_ip=inst.host_ip, ports={k: v for k, v in ports.items() if v},
-        ssh_host=target[0] if target else None, ssh_port=target[1] if target else None,
-        dph=chosen.dph_total,
-    )
-    store.save(state)
-    return store, run_id, state, chosen, inst
+    except PipelineError as e:
+        _fail(str(e))
+    chosen = Offer(id=state.offer_id, gpu_name=state.offer_label, dph_total=state.dph)
+    return store, state.run_id, state, chosen, inst
 
 
 @app.command()
@@ -456,10 +391,7 @@ def reap(yes: YES_OPT = False, verbose: VERBOSE_OPT = False) -> None:
                 log.warn(f"could not destroy {i.id}: {e}")
 
 
-# --- M3+ stubs (surface is stable; logic lands in later milestones) ---------
-def _stub(what: str, milestone: str) -> None:
-    log.warn(f"`{what}` is planned for {milestone} — not built in this stage yet.")
-    raise typer.Exit(0)
+# --- M3–M6: serve / provision / connect / bench / publish / run -------------
 
 
 @app.command()
@@ -599,35 +531,118 @@ def logs(spec: SPEC_OPT = None, instance: INSTANCE_OPT = None,
 @app.command()
 def connect(spec: SPEC_OPT = None, instance: INSTANCE_OPT = None,
             verbose: VERBOSE_OPT = False) -> None:
-    """Resolve the endpoint (direct port or SSH tunnel) and verify /v1."""
-    _stub("connect", "M4")
+    """Resolve the endpoint (direct port or SSH tunnel), verify /v1, print it.
+
+    A tunnel is left running in the background (its pid is saved in the run
+    state; `destroy --run` closes it)."""
+    cfg = _cfg()
+    try:
+        s = _spec(spec)
+    except (SpecError, ConfigError) as e:
+        _fail(str(e))
+    with _client(cfg) as c:
+        box, inst, state = _box_for(cfg, c, s, instance)
+        try:
+            conn = connect_box(box, s)
+        except ConnectError as e:
+            _fail(str(e))
+    if state is not None:
+        state.endpoint, state.connect_mode, state.tunnel_pid = conn.endpoint, conn.mode, conn.tunnel_pid
+        state.status = "connected"
+        _state_store(cfg).save(state)
+    log.success(f"endpoint: {conn.endpoint}  ({conn.mode}; model '{s.model.id}')")
+    log.info(f"try it:  curl {conn.endpoint}/models")
 
 
 @app.command()
-def bench(spec: SPEC_OPT = None, endpoint: Annotated[Optional[str], typer.Option()] = None,
+def bench(spec: SPEC_OPT = None,
+          endpoint: Annotated[Optional[str], typer.Option(help="OpenAI /v1 base; default: the latest run's")] = None,
+          out: Annotated[Optional[str], typer.Option(help="results.json path")] = None,
           verbose: VERBOSE_OPT = False) -> None:
-    """Run the pinned BetterBench against an endpoint; write results.json."""
-    _stub("bench", "M5")
+    """Run the pinned BetterBench against an endpoint; write + validate results.json."""
+    cfg = _cfg()
+    try:
+        s = _spec(spec)
+    except (SpecError, ConfigError) as e:
+        _fail(str(e))
+    store = _state_store(cfg)
+    state = None
+    if endpoint is None:
+        state = latest_state(store)
+        if state is None or not state.endpoint:
+            _fail("no endpoint: pass --endpoint URL or run `bbvastl80 connect` first")
+        endpoint = state.endpoint
+    target = Path(out) if out else (
+        Path(cfg.runs_dir) / state.run_id / "results.json" if state else Path("results.json"))
+    try:
+        verify_v1(endpoint, s.serving.resolved_model_id(s.model), timeout_s=15)
+        run_bench(cfg.betterbench_bin, s, endpoint, target)
+        summary = validate_results(target)
+    except (ConnectError, BenchError) as e:
+        _fail(str(e))
+    if state is not None:
+        state.results_path, state.status = str(target), "benchmarked"
+        store.save(state)
+    log.success(f"results: {target} · {summary}")
 
 
 @app.command()
-def publish(results: Annotated[str, typer.Argument()],
-            dry_run: Annotated[bool, typer.Option()] = False,
+def publish(results: Annotated[str, typer.Argument(help="a BetterBench results.json")],
+            spec: SPEC_OPT = None,
+            dry_run: Annotated[bool, typer.Option("--dry-run", help="validate with L80, don't publish")] = False,
             verbose: VERBOSE_OPT = False) -> None:
-    """Publish a results.json via the L80 CLI."""
-    _stub("publish", "M5")
+    """Publish a results.json via the L80 CLI (public!). Validates it first."""
+    cfg = _cfg()
+    try:
+        s = _spec_or_default(spec)
+    except SpecError as e:
+        _fail(str(e))
+    path = Path(results)
+    try:
+        validate_results(path)
+        url = run_publish(cfg.l80_bin, s, path, dry_run=dry_run or None)
+    except (BenchError, PublishError) as e:
+        _fail(str(e))
+    if url:
+        log.success(f"published: {url}")
+        store = _state_store(cfg)
+        for rid in store.list_run_ids():
+            st = store.load(rid)
+            if st.results_path and Path(st.results_path).resolve() == path.resolve():
+                st.publish_url, st.status = url, "published"
+                store.save(st)
+                break
 
 
 @app.command()
 def run(spec: SPEC_OPT = None,
-        up_to: Annotated[Optional[str], typer.Option()] = None,
-        dry_run: Annotated[bool, typer.Option()] = False,
-        keep: Annotated[bool, typer.Option()] = False,
+        up_to: Annotated[Optional[str], typer.Option("--up-to", help="stop after: " + ", ".join(PHASES))] = None,
+        dry_run: Annotated[bool, typer.Option("--dry-run", help="search + plan only, no billing")] = False,
+        keep: Annotated[bool, typer.Option("--keep", help="leave the box running at the end")] = False,
+        publish_dry_run: Annotated[bool, typer.Option("--publish-dry-run", help="L80 dry run instead of publishing")] = False,
         offer: OFFER_OPT = None,
         instance: INSTANCE_OPT = None,
         verbose: VERBOSE_OPT = False) -> None:
-    """The full pipeline: serve + bench + publish (the one-command run)."""
-    _stub("run", "M6")
+    """The full pipeline: rent → provision → connect → bench → publish → destroy."""
+    cfg = _cfg()
+    try:
+        s = _spec(spec)
+    except (SpecError, ConfigError) as e:
+        _fail(str(e))
+    with _client(cfg) as c:
+        try:
+            if dry_run:
+                pipeline_dry_run(s, c)
+                return
+            state = run_pipeline(cfg, s, c, up_to=up_to, keep=keep, offer=offer,
+                                 instance=instance, publish_dry_run=True if publish_dry_run else None)
+        except VastAuthError as e:
+            _fail(str(e))
+        except PipelineError as e:
+            _fail(str(e))
+    log.success(f"run {state.run_id}: {state.status}"
+                + (f" · {state.publish_url}" if state.publish_url else "")
+                + (f" · results {state.results_path}" if state.results_path else ""))
 
 
 def main() -> None:

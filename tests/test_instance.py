@@ -21,7 +21,7 @@ def js(obj):
 def test_rent_body_engine():
     body = rent_body(Offer(id=1, gpu_name="H100"), engine_serving(), InstanceSpec())
     assert body == {
-        "client_id": "me", "image": "ghcr.io/vllm/vllm-openai:latest", "disk": 200,
+        "client_id": "me", "image": "vllm/vllm-openai:latest", "disk": 200,
         "runtype": "ssh", "label": "bbvastl80", "env": {"-p 8000:8000": "1"},
     }
 

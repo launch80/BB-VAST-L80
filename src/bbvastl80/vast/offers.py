@@ -10,7 +10,10 @@ from bbvastl80.spec import GPUFilter
 from bbvastl80.vast.models import Offer
 
 
-def build_search_body(f: GPUFilter, *, limit: int | None = None) -> dict:
+def build_search_body(f: GPUFilter, *, limit: int | None = None,
+                      min_disk_gb: float | None = None) -> dict:
+    """``min_disk_gb`` (the spec's ``instance.disk_gb``) drops offers whose
+    host can't give us that much disk — renting one of those 400s."""
     body: dict = {}
     body["limit"] = limit if limit is not None else f.limit
     # ``order`` is a *list of [field, direction] tuples* on the real API
@@ -38,6 +41,9 @@ def build_search_body(f: GPUFilter, *, limit: int | None = None) -> dict:
         flt["datacenter"] = {"eq": f.datacenter}
     if f.geolocation:
         flt["geolocation"] = {"eq": f.geolocation}
+    if min_disk_gb is not None:
+        flt["disk_space"] = {"gte": float(min_disk_gb)}
+    flt["rentable"] = {"eq": True}
     if flt:
         body.update(flt)
     return body

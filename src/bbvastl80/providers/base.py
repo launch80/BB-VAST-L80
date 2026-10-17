@@ -226,7 +226,7 @@ class Provider(ABC):
         """The foreground command that serves ``/v1`` on ``spec.serving.port``."""
 
     def health_cmd(self, spec: RunSpec) -> str:
-        return f"curl -sf localhost:{spec.serving.port}/v1/models"
+        return health_probe(f"http://localhost:{spec.serving.port}/v1/models")
 
     # --- readiness --------------------------------------------------------
     def is_ready(self, box: Box, spec: RunSpec) -> bool:
@@ -283,6 +283,13 @@ class Provider(ABC):
             'echo "launched pid $(cat ' + SERVER_PID + ')"',
         ]
         return "\n".join(lines) + "\n"
+
+
+def health_probe(url: str) -> str:
+    """``curl`` the URL, falling back to python when the image has no curl."""
+    py = ("import sys,urllib.request as u;"
+          f"sys.stdout.write(u.urlopen('{url}',timeout=5).read().decode())")
+    return f"(curl -sf {url} || python3 -c {shlex.quote(py)})"
 
 
 def _sq(s: str) -> str:

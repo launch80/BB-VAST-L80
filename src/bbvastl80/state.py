@@ -38,6 +38,7 @@ class RunState(BaseModel):
     # connectivity
     endpoint: str | None = None
     connect_mode: str | None = None
+    tunnel_pid: int | None = None
     # benchmark / publish
     results_path: str | None = None
     publish_url: str | None = None

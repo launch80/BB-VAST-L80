@@ -8,7 +8,7 @@ presets, so they run from ``onstart`` on first boot and/or over SSH.
 """
 from __future__ import annotations
 
-from .base import Box, Provider
+from .base import Box, Provider, health_probe
 
 
 class CustomProvider(Provider):
@@ -28,7 +28,7 @@ class CustomProvider(Provider):
         return cfg.start
 
     def health_cmd(self, spec) -> str:
-        return f"curl -sf localhost:{spec.serving.port}{spec.serving.custom.health.path}"
+        return health_probe(f"http://localhost:{spec.serving.port}{spec.serving.custom.health.path}")
 
     def is_ready(self, box: Box, spec) -> bool:
         cfg = spec.serving.custom

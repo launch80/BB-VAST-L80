@@ -1,0 +1,71 @@
+# Quick BetterBench of Launch80's Swift-1.5 Qwen3.8-27B Uncensored Int4 bake on
+# 2x H200 NVL rented from Vast.ai, served by stock vLLM (TP=2, MTP k=6, fp8 KV —
+# the model card's recommended CUDA flags), published to launch80 via L80, box
+# destroyed after the publish.
+name: swift-qwen3.8-27b-int4-2xh200nvl
+
+gpu:
+  names: [H200 NVL]
+  count: 2
+  max_dph: 9.0
+  type: ondemand
+  verified: true
+  min_reliability: 0.95
+  pick: cheapest
+
+model:
+  id: Launch80/Swift-1.5-Qwen3.8-27B-Uncensored-Int4-baked
+  source: hf
+  hf_repo: Launch80/Swift-1.5-Qwen3.8-27B-Uncensored-Int4-baked
+
+serving:
+  mode: engine
+  port: 8000
+  engine:
+    engine: vllm                      # vllm/vllm-openai:latest (v0.31 at the time of writing)
+    max_model_len: 262144
+    gpu_mem_util: 0.90
+    extra_args:
+      - --quantization
+      - gptq
+      - --dtype
+      - float16
+      - --kv-cache-dtype
+      - fp8
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":6}'
+
+instance:
+  disk_gb: 120                        # ~17 GB of weights + the vLLM image layers
+  runtype: ssh
+  label: bbvastl80
+  bootstrap: onstart                  # start pulling + serving on first boot
+
+benchmark:
+  quick: true                         # 1 warmup + 5 passes per category (smoke numbers)
+  notes:
+    engine: vllm
+    image: vllm/vllm-openai:latest
+    hardware: 2x H200 NVL (Vast.ai)
+    tp: "2"
+    quant: gptq-int4-baked
+    spec: mtp-k6
+    kv: fp8
+
+publish:
+  template: bench.betterbench.v1
+  title: "Swift-1.5 Qwen3.8-27B Uncensored Int4 baked on 2x H200 NVL (Vast.ai, vLLM TP=2, MTP k=6): quick BetterBench"
+  summary: "Quick run (1 warmup + 5 passes per category) of Launch80/Swift-1.5-Qwen3.8-27B-Uncensored-Int4-baked served by stock vLLM on two rented H200 NVL, orchestrated end-to-end by bbvastl80."
+  dry_run: false
+
+budget:
+  max_total_usd: 15.0                 # abort before renting if the balance is below this
+  max_provision_min: 30               # image pull + 17 GB weights + vLLM warm-up
+
+connect:
+  mode: auto                          # direct public port if it answers, else SSH tunnel
+  local_port: 8000
+
+lifecycle:
+  teardown: auto                      # destroy after the publish (and on failure)
+  keep_running: false

@@ -81,7 +81,7 @@ def test_build_box_falls_back_to_vast_ssh_proxy(transport):
 
 
 def test_provision_short_circuits_when_already_serving(transport, no_sleep):
-    t = Scripted([("curl -sf localhost:8000/v1/models", 0, '{"data":[{"id":"m"}]}')])
+    t = Scripted([("curl -sf http://localhost:8000/v1/models", 0, '{"data":[{"id":"m"}]}')])
     transport["t"] = t
     box = bs.provision(None, running_instance(), make_spec())
     assert box.ssh_port == 41122
@@ -93,7 +93,7 @@ def test_provision_pushes_script_then_waits_for_v1(transport, no_sleep):
 
     class T(Scripted):
         def run(self, box, cmd, timeout=120.0):
-            if "curl -sf localhost:8000/v1/models" in cmd:
+            if "curl -sf http://localhost:8000/v1/models" in cmd:
                 health["n"] += 1
                 self.calls.append(cmd)
                 return ExecResult(0 if health["n"] >= 3 else 7, "")
