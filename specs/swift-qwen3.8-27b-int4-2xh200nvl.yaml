@@ -29,7 +29,7 @@ serving:
       - --quantization
       - gptq
       - --dtype
-      - float16
+      - bfloat16                      # FA3 on Hopper needs bf16 when the KV cache is fp8 (fp16 crashes at warm-up)
       - --kv-cache-dtype
       - fp8
       - --speculative-config
