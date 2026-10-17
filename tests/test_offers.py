@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from bbvastl80.spec import GPUFilter
 from bbvastl80.vast.models import Offer
-from bbvastl80.vast.offers import build_search_body, pick_offer
+from bbvastl80.vast.offers import build_search_body, pick_offer, rank_offers
 
 
 def make_offer(i, dph, **kw):
@@ -44,6 +44,15 @@ def test_pick_cheapest():
 def test_pick_first():
     offers = [make_offer(1, 2.0), make_offer(2, 0.9)]
     assert pick_offer(offers, "first").id == 1
+
+
+def test_rank_offers_cheapest_orders_and_index_starts():
+    offers = [make_offer(1, 2.0), make_offer(2, 0.5), make_offer(3, 1.0)]
+    assert [o.id for o in rank_offers(offers, "cheapest")] == [2, 3, 1]
+    # index 2 starts at the 2nd-cheapest and continues with the rest
+    assert [o.id for o in rank_offers(offers, 2)] == [3, 1]
+    # 'first' keeps raw API order
+    assert [o.id for o in rank_offers(offers, "first")] == [1, 2, 3]
 
 
 def test_pick_index_is_into_cheapest_first_ranking():

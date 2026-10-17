@@ -51,8 +51,10 @@ class Offer(BaseModel):
 
 
 # --- status vocabulary -------------------------------------------------------
+# ``actual_status`` is the lifecycle field the live API returns. "loading" is the
+# provisioning state; it flips to "running" once the box is up and reachable.
 RUNNING = "running"
-WAITING = {"initializing", "pending", "deploying", "starting", "in-progress", "waiting"}
+WAITING = {"loading", "initializing", "pending", "deploying", "starting", "in-progress", "waiting"}
 TERMINAL_FAIL = {
     "exited",
     "stopped",
@@ -66,14 +68,21 @@ TERMINAL_FAIL = {
 
 
 class Instance(BaseModel):
-    """A rented instance (contract). Tolerant of schema drift."""
+    """A rented instance (contract). Tolerant of schema drift.
 
-    model_config = ConfigDict(extra="allow")
+    The live v0 record names its fields ``actual_status`` / ``public_ipaddr``;
+    we alias them to the friendlier ``status`` / ``public_ip`` attributes (and
+    ``populate_by_name`` lets tests keep passing the short names).
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
     id: int | None = None
-    status: str | None = None
+    status: str | None = Field(default=None, validation_alias="actual_status")
     type: int | str | None = None  # instance-type code (int) or label
-    public_ip: str | None = None
+    public_ip: str | None = Field(default=None, validation_alias="public_ipaddr")
     ip: str | None = None
+    ssh_host: str | None = None
+    ssh_port: int | None = None
     env: dict[str, str] = Field(default_factory=dict)
     ports: object = None  # list of {internal, external} or a dict — parsed lazily
     offer: object = None

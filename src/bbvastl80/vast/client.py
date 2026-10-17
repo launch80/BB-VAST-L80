@@ -1,15 +1,18 @@
 """A small httpx client for the Vast.ai REST API.
 
-The API is split across two versions (confirmed against the live endpoint):
+Versioning is *mixed* (confirmed against the live endpoint and the official
+``vast-cli`` Python client, which is the source of truth):
 
-* **Offers search** lives on **v0**: ``POST /api/v0/bundles``.
-* **Instance lifecycle** (create / get / list / command / destroy) lives on
-  **v1**: ``/api/v1/instances…`` and ``/api/v1/asks/{id}``. The v0 equivalents
-  are deprecated (list 410s; a v0 ``asks`` POST returns a raw HTML 404).
+* **Offers search** → **v0**: ``POST /api/v0/bundles``.
+* **Instance *list*** → **v1**: ``GET /api/v1/instances/`` (the v0 list 410s).
+* **Every other instance op** (single get / create / destroy / command) →
+  **v0**. In particular, creating an instance from a *single* offer is
+  ``PUT /api/v0/asks/{id}/`` — a **PUT**, not a POST (a POST 404s), and the
+  payload must carry ``client_id: "me"``.
 
-The client keeps a v0 base for search and derives a v1 base for everything else.
-Paths are relative and joined explicitly (no httpx base_url) so there is no
-RFC-3986 path-joining ambiguity.
+The client keeps a v0 base (the default) and derives a v1 base used only by the
+list call. Paths are relative and joined explicitly (no httpx base_url) so there
+is no RFC-3986 path-joining ambiguity.
 """
 from __future__ import annotations
 
@@ -20,14 +23,14 @@ import httpx
 
 from bbvastl80.vast.models import Instance, Offer, User
 
-# Relative paths. OFFERS live on the v0 base; INSTANCES on the v1 base.
+# Relative paths. Only the *list* call uses the v1 base; the rest use v0.
 P_USER = "users/current/"
 P_BUNDLES = "bundles"            # v0
-P_ASKS = "asks/{id}/"            # v1
-P_INSTANCE = "instances/{id}"    # v1
-P_INSTANCES = "instances"        # v1
-P_COMMAND = "instances/command/{id}"   # v1
-P_LOGS = "instances/request_logs/{id}"  # v1
+P_ASKS = "asks/{id}/"            # v0 (PUT for a single-offer create)
+P_INSTANCE = "instances/{id}"    # v0
+P_INSTANCES = "instances"        # v1 (list)
+P_COMMAND = "instances/command/{id}"   # v0
+P_LOGS = "instances/request_logs/{id}"  # v0
 
 
 class VastError(Exception):
@@ -107,18 +110,23 @@ class VastClient:
         return [Offer(**o) for o in offers]
 
     def create_instance(self, offer_id: int, body: dict[str, Any]) -> int:
-        data = self._request("POST", P_ASKS.format(id=offer_id), json=body, base=self.v1_base_url)
+        # Single-offer create is a PUT on the v0 base (a POST 404s).
+        data = self._request("PUT", P_ASKS.format(id=offer_id), json=body)
         new_contract = data.get("new_contract", data.get("id"))
         if new_contract is None:
             raise VastError(f"create-instance for offer {offer_id} returned no id: {data}")
         return int(new_contract)
 
     def get_instance(self, instance_id: int) -> Instance:
-        data = self._request("GET", P_INSTANCE.format(id=instance_id), base=self.v1_base_url)
-        # v0 wrapped a single instance under {"instances": {...}}; v1 is flat.
-        # Unwrap if present so both shapes parse.
-        if isinstance(data, dict) and isinstance(data.get("instances"), dict):
+        data = self._request("GET", P_INSTANCE.format(id=instance_id),
+                             params={"owner": "me"})
+        # v0 wraps a single instance under {"instances": {...}} (null if not
+        # resolvable yet); v1 is flat. Unwrap, and surface "not yet" as a 404.
+        if isinstance(data, dict) and "instances" in data:
             data = data["instances"]
+        if data is None:
+            raise VastHTTPError("GET", P_INSTANCE.format(id=instance_id), 404,
+                                "instance not resolvable yet")
         return Instance(**data)
 
     def list_instances(self) -> list[Instance]:
@@ -134,13 +142,11 @@ class VastClient:
         return []
 
     def destroy_instance(self, instance_id: int) -> None:
-        self._request("DELETE", P_INSTANCE.format(id=instance_id), base=self.v1_base_url)
+        self._request("DELETE", P_INSTANCE.format(id=instance_id))
 
     def execute(self, instance_id: int, command: str) -> Any:
         """Queue a command on the box; returns the API response (has a result URL)."""
-        return self._request("PUT", P_COMMAND.format(id=instance_id), json={"command": command},
-                             base=self.v1_base_url)
+        return self._request("PUT", P_COMMAND.format(id=instance_id), json={"command": command})
 
     def get_logs(self, instance_id: int, **params: Any) -> Any:
-        return self._request("GET", P_LOGS.format(id=instance_id), params=params or None,
-                             base=self.v1_base_url)
+        return self._request("GET", P_LOGS.format(id=instance_id), params=params or None)

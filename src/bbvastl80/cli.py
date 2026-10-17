@@ -20,7 +20,7 @@ from bbvastl80.state import RunState, StateStore
 from bbvastl80.vast import VastAuthError, VastClient, VastError
 from bbvastl80.vast.instance import ProvisionError, rent as rent_box, wait_for_running
 from bbvastl80.vast.models import Instance, Offer
-from bbvastl80.vast.offers import build_search_body, pick_offer
+from bbvastl80.vast.offers import build_search_body, pick_offer, rank_offers
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
 
@@ -262,9 +262,9 @@ def rent(spec: SPEC_OPT = None, offer: OFFER_OPT = None, verbose: VERBOSE_OPT = 
                 _fail(f"balance ${user.credit:.2f} < budget ${s.budget.max_total_usd:.2f}; "
                       "top up at https://cloud.vast.ai or lower budget.max_total_usd")
 
-        # pick an offer
+        # choose candidate offers (ranked by the pick strategy)
         if offer is not None:
-            chosen = _offer_from_id(cfg, offer)
+            candidates = [_offer_from_id(cfg, offer)]
         else:
             try:
                 offers = c.search_offers(build_search_body(s.gpu))
@@ -272,18 +272,26 @@ def rent(spec: SPEC_OPT = None, offer: OFFER_OPT = None, verbose: VERBOSE_OPT = 
                 _fail(f"search failed: {e}")
             if not offers:
                 _fail("no offers matched — relax the gpu filter")
-            chosen = pick_offer(offers, s.gpu.pick)
-            if not chosen:
+            candidates = rank_offers(offers, s.gpu.pick)
+            if not candidates:
                 _fail("no offer selected")
-        log.info(f"renting offer {chosen.id} ({chosen.label})")
 
-        # rent
-        try:
-            instance_id = rent_box(c, chosen, s.serving, s.instance)
-        except VastAuthError as e:
-            _fail(str(e))
-        except VastError as e:
-            _fail(f"rent failed: {e}")
+        # Rent. Offers vanish fast on the open market, so try candidates in
+        # order until one takes; a "not available"/stale offer just moves on.
+        chosen, instance_id, last_err = None, None, None
+        for cand in candidates:
+            log.info(f"renting offer {cand.id} ({cand.label})")
+            try:
+                instance_id = rent_box(c, cand, s.serving, s.instance)
+                chosen = cand
+                break
+            except VastAuthError as e:
+                _fail(str(e))  # an auth problem won't clear by trying another offer
+            except VastError as e:
+                last_err = e
+                log.detail(f"  offer {cand.id} not rentable ({' '.join(str(e).split())[:90]}) — trying next")
+        if instance_id is None:
+            _fail(f"no offer could be rented ({len(candidates)} tried): {last_err}")
 
         # wait for running
         log.info(f"instance {instance_id} created — waiting up to "

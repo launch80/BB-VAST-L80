@@ -43,18 +43,30 @@ def build_search_body(f: GPUFilter, *, limit: int | None = None) -> dict:
     return body
 
 
-def pick_offer(offers: list[Offer], pick: str = "cheapest") -> Offer | None:
-    """Select an offer. ``cheapest`` sorts by $/hr; ``first`` keeps order; an
-    integer picks the 1-based index into the (sorted) list."""
-    if not offers:
-        return None
+def rank_offers(offers: list[Offer], pick: str = "cheapest") -> list[Offer]:
+    """Return offers ordered by the pick strategy.
+
+    ``cheapest`` sorts ascending by $/hr; ``first`` keeps API order; a 1-based
+    integer starts the ranking at that index (into the cheapest-first order) and
+    continues with the rest — useful for trying the N-th-cheapest and falling
+    through to the next if it has just been taken.
+    """
+    if pick in ("first", ""):
+        return list(offers)
     ranked = sorted(offers, key=lambda o: (o.dph_total is None, o.dph_total or 0.0))
-    if pick in ("cheapest", "first", ""):
-        return ranked[0] if pick == "cheapest" else offers[0]
+    if pick == "cheapest":
+        return ranked
     try:
         idx = int(pick)
     except ValueError:
-        raise ValueError(f"gpu.pick must be 'cheapest', 'first', or a 1-based index (got {pick!r})")
+        raise ValueError(
+            f"gpu.pick must be 'cheapest', 'first', or a 1-based index (got {pick!r})")
     if not 1 <= idx <= len(ranked):
         raise ValueError(f"gpu.pick index {idx} out of range 1..{len(ranked)}")
-    return ranked[idx - 1]
+    return ranked[idx - 1:]
+
+
+def pick_offer(offers: list[Offer], pick: str = "cheapest") -> Offer | None:
+    """Select a single offer (the first of :func:`rank_offers`)."""
+    ranked = rank_offers(offers, pick)
+    return ranked[0] if ranked else None

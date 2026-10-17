@@ -11,7 +11,7 @@ import time
 from bbvastl80 import log
 from bbvastl80.providers import resolve_image, resolve_port
 from bbvastl80.spec import InstanceSpec, ServingSpec
-from bbvastl80.vast.client import VastClient, VastHTTPError
+from bbvastl80.vast.client import VastAuthError, VastClient, VastError
 from bbvastl80.vast.models import Instance, Offer
 
 
@@ -22,6 +22,7 @@ class ProvisionError(Exception):
 def rent_body(offer: Offer, serving: ServingSpec, instance: InstanceSpec) -> dict:
     port = resolve_port(serving)
     body: dict = {
+        "client_id": "me",  # required by the asks endpoint (see vast-cli)
         "image": resolve_image(serving),
         "disk": instance.disk_gb,
         "runtype": instance.runtype,
@@ -53,8 +54,10 @@ def wait_for_running(client: VastClient, instance_id: int, *, timeout_min: float
     while time.time() < deadline:
         try:
             last = client.get_instance(instance_id)
-        except VastHTTPError:
-            last = None  # not resolvable yet (e.g. 404) — keep polling
+        except VastAuthError:
+            raise  # a key/scope problem won't fix itself by polling — fail fast
+        except VastError:
+            last = None  # transient: network blip, or not resolvable yet (404/null)
         if last is not None:
             if last.is_running:
                 return last
