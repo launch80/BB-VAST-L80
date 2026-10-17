@@ -460,9 +460,8 @@ the "all requests failed → don't publish" guard.
   (real rent→poll→destroy round-trip; `PUT /asks/{id}/`+`client_id` contract)
 - **M3 — provision.** `engines.py` (vLLM + llama.cpp), `bootstrap.py`,
   provider-rendered bootstrap script delivered as `onstart` + over SSH; SSH key
-  registration; commands `provision`, `ssh`, `logs`. ✅ built (59 tests);
-  **needs one live rent→serve run to validate** (the execute-endpoint design it
-  replaces was a dead end — see §4 step 6).
+  registration; commands `provision`, `ssh`, `logs`. ✅ built, live-validated
+  (the execute-endpoint design it replaces was a dead end — see §4 step 6).
 - **M4 — connect.** `connect.py`: direct public port when it answers, else a
   background `ssh -N -L` tunnel (pid in state, closed by `destroy --run`);
   `/v1` verified (model id listed) before anything uses it; command `connect`.
@@ -474,8 +473,15 @@ the "all requests failed → don't publish" guard.
   publish → reap with state, `--up-to`, `--dry-run`, `--keep`,
   `--publish-dry-run`, `--offer/--instance`; teardown after a successful
   publish and on failure (unless `--keep`); cost estimate. End-to-end tested
-  against respx + fake `betterbench`/`l80` binaries (80 tests). ✅ built —
-  first real run: `specs/swift-qwen3.8-27b-int4-2xh200nvl.yaml`.
+  against respx + fake `betterbench`/`l80` binaries (83 tests). ✅ built and
+  **live-validated 2026-10-17**: `specs/swift-qwen3.8-27b-int4-2xh200nvl.yaml`
+  rented 2x H200 NVL, served the Swift-1.5 Qwen3.8-27B Int4 bake with vLLM
+  0.31 (TP=2, MTP k=6, fp8 KV, bf16), ran a quick BetterBench, published
+  https://launch80.com/a/a23e4a7c-f503-4d78-985f-5fba6478257d and destroyed
+  the box. Lessons baked in along the way: host start failures fail over to
+  the next offer; sshd StrictModes must be relaxed for Vast's authorized_keys;
+  FA3 + fp8 KV needs bf16 on Hopper; the execute endpoint only works on
+  *stopped* instances.
 - **M7 — polish.** README, `run.example.yaml`, richer error messages, cost
   reporting, sglang/tgi/ollama engines, interruptible (`bid`) pricing path.
 

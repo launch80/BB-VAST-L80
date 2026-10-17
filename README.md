@@ -19,7 +19,8 @@ engine-agnostic.
 script that ships as the instance's `onstart` and is also pushed over SSH. `connect`
 resolves a verified `/v1` here (direct port or SSH tunnel), `bench` runs the
 pinned BetterBench, `publish` pushes through L80, and `run` chains it all and
-destroys the box after the publish. See `specs/` for a real run spec.
+destroys the box after the publish. See `specs/` for a real run spec; the first
+live run published https://launch80.com/a/a23e4a7c-f503-4d78-985f-5fba6478257d.
 
 The Vast client is exercised against the **live API** (search/list/status all
 return clean, actionable errors with a valid key).
@@ -130,7 +131,7 @@ src/bbvastl80/
   publish.py        # spawn l80, parse the page URL
   run.py            # the pipeline + teardown policy + cost estimate
 specs/              # real run specs (e.g. 2x H200 NVL quick bench)
-tests/              # 80 tests: spec, offers, client (respx), instance, providers,
+tests/              # 83 tests: spec, offers, client (respx), instance, providers,
                     # bootstrap, sshkeys, connect, bench/publish, pipeline e2e
 run.example.yaml    # fully-commented starter spec
 ```
