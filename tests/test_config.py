@@ -39,3 +39,11 @@ def test_state_missing_raises(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
         store.load("nope-1")
+
+
+def test_client_derives_v1_base_for_instances(tmp_path):
+    from bbvastl80.vast.client import VastClient
+    c = VastClient("k")
+    assert c.base_url == "https://console.vast.ai/api/v0"
+    assert c.v1_base_url == "https://console.vast.ai/api/v1"
+    c.close()

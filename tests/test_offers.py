@@ -23,7 +23,8 @@ def test_build_search_body_full():
     assert body["gpu_total_ram"] == {"gte": 80 * 1024}  # MB
     assert body["dph_total"] == {"lte": 3.0}
     assert body["type"] == "ondemand"  # plain enum, not an operator object
-    assert body["rel"] == {"gte": 0.99}
+    assert body["verified"] == {"eq": True}  # operator object (dict)
+    assert body["reliability"] == {"gte": 0.99}
     assert body["datacenter"] == {"eq": "us-east-1"}
     assert body["order"] == [["dph_total", "asc"]]  # list of [field, dir] tuples
 

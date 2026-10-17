@@ -1,10 +1,15 @@
 """A small httpx client for the Vast.ai REST API.
 
-Base URL is ``https://console.vast.ai/api/v0``; every path below is *relative*
-to it (no leading slash), which is what makes httpx join them correctly.
+The API is split across two versions (confirmed against the live endpoint):
 
-Note on the search endpoint: it is ``POST /bundles`` (not ``/offers``) — that
-is the current name in Vast's OpenAPI spec.
+* **Offers search** lives on **v0**: ``POST /api/v0/bundles``.
+* **Instance lifecycle** (create / get / list / command / destroy) lives on
+  **v1**: ``/api/v1/instances…`` and ``/api/v1/asks/{id}``. The v0 equivalents
+  are deprecated (list 410s; a v0 ``asks`` POST returns a raw HTML 404).
+
+The client keeps a v0 base for search and derives a v1 base for everything else.
+Paths are relative and joined explicitly (no httpx base_url) so there is no
+RFC-3986 path-joining ambiguity.
 """
 from __future__ import annotations
 
@@ -15,14 +20,14 @@ import httpx
 
 from bbvastl80.vast.models import Instance, Offer, User
 
-# Relative paths (joined onto the api/v0 base url).
+# Relative paths. OFFERS live on the v0 base; INSTANCES on the v1 base.
 P_USER = "users/current/"
-P_BUNDLES = "bundles"
-P_ASKS = "asks/{id}/"
-P_INSTANCE = "instances/{id}"
-P_INSTANCES = "instances"
-P_COMMAND = "instances/command/{id}"
-P_LOGS = "instances/request_logs/{id}"
+P_BUNDLES = "bundles"            # v0
+P_ASKS = "asks/{id}/"            # v1
+P_INSTANCE = "instances/{id}"    # v1
+P_INSTANCES = "instances"        # v1
+P_COMMAND = "instances/command/{id}"   # v1
+P_LOGS = "instances/request_logs/{id}"  # v1
 
 
 class VastError(Exception):
@@ -44,7 +49,9 @@ class VastClient:
                  timeout: float = 30.0):
         if not api_key:
             raise VastAuthError("no API key supplied")
-        self.base_url = base_url.rstrip("/")
+        self.base_url = base_url.rstrip("/")          # v0 (offers search)
+        # Instance lifecycle moved to v1; derive it from the v0 base.
+        self.v1_base_url = self.base_url.replace("/v0", "/v1")
         # No httpx base_url: we build explicit full URLs so there is no
         # ambiguity in path joining (RFC 3986 would drop the /v0 segment).
         self._http = httpx.Client(
@@ -64,8 +71,8 @@ class VastClient:
 
     # --- transport ----------------------------------------------------------
     def _request(self, method: str, path: str, *, params: dict | None = None,
-                 json: Any | None = None) -> Any:
-        url = f"{self.base_url}/{path.lstrip('/')}"
+                 json: Any | None = None, base: str | None = None) -> Any:
+        url = f"{(base or self.base_url).rstrip('/')}/{path.lstrip('/')}"
         try:
             r = self._http.request(method, url, params=params, json=json)
         except httpx.HTTPError as e:  # network-level failure
@@ -100,17 +107,22 @@ class VastClient:
         return [Offer(**o) for o in offers]
 
     def create_instance(self, offer_id: int, body: dict[str, Any]) -> int:
-        data = self._request("POST", P_ASKS.format(id=offer_id), json=body)
+        data = self._request("POST", P_ASKS.format(id=offer_id), json=body, base=self.v1_base_url)
         new_contract = data.get("new_contract", data.get("id"))
         if new_contract is None:
             raise VastError(f"create-instance for offer {offer_id} returned no id: {data}")
         return int(new_contract)
 
     def get_instance(self, instance_id: int) -> Instance:
-        return Instance(**self._request("GET", P_INSTANCE.format(id=instance_id)))
+        data = self._request("GET", P_INSTANCE.format(id=instance_id), base=self.v1_base_url)
+        # v0 wrapped a single instance under {"instances": {...}}; v1 is flat.
+        # Unwrap if present so both shapes parse.
+        if isinstance(data, dict) and isinstance(data.get("instances"), dict):
+            data = data["instances"]
+        return Instance(**data)
 
     def list_instances(self) -> list[Instance]:
-        data = self._request("GET", P_INSTANCES)
+        data = self._request("GET", P_INSTANCES, base=self.v1_base_url)
         if isinstance(data, dict):
             for key in ("instances", "results", "offers"):
                 if key in data and isinstance(data[key], list):
@@ -122,11 +134,13 @@ class VastClient:
         return []
 
     def destroy_instance(self, instance_id: int) -> None:
-        self._request("DELETE", P_INSTANCE.format(id=instance_id))
+        self._request("DELETE", P_INSTANCE.format(id=instance_id), base=self.v1_base_url)
 
     def execute(self, instance_id: int, command: str) -> Any:
         """Queue a command on the box; returns the API response (has a result URL)."""
-        return self._request("PUT", P_COMMAND.format(id=instance_id), json={"command": command})
+        return self._request("PUT", P_COMMAND.format(id=instance_id), json={"command": command},
+                             base=self.v1_base_url)
 
     def get_logs(self, instance_id: int, **params: Any) -> Any:
-        return self._request("GET", P_LOGS.format(id=instance_id), params=params or None)
+        return self._request("GET", P_LOGS.format(id=instance_id), params=params or None,
+                             base=self.v1_base_url)

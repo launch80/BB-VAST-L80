@@ -35,12 +35,18 @@ class Config:
     # --- resolution -------------------------------------------------------
     @classmethod
     def load(cls) -> "Config":
+        # Priority: real environment > project .env > ~/.config/bbvastl80/credentials
         api_key = os.environ.get("VAST_API_KEY")
         if not api_key:
+            api_key = _read_dotenv("VAST_API_KEY")
+        if not api_key:
             api_key = _read_credentials_file()
+        api_base = os.environ.get("VAST_API_BASE")
+        if not api_base:
+            api_base = _read_dotenv("VAST_API_BASE")
         return cls(
             api_key=api_key,
-            api_base=os.environ.get("VAST_API_BASE", DEFAULT_API_BASE).rstrip("/"),
+            api_base=(api_base or DEFAULT_API_BASE).rstrip("/"),
             l80_bin=os.environ.get("L80_BIN", "l80"),
             betterbench_bin=os.environ.get(
                 "L80_BETTERBENCH",
@@ -68,6 +74,21 @@ class Config:
             else _which("betterbench"),
             "ssh": _which("ssh"),
         }
+
+
+def _read_dotenv(key: str) -> str | None:
+    """Read a key from a ``.env`` file in the CWD (minimal parser, no dep)."""
+    candidate = Path.cwd() / ".env"
+    if not candidate.is_file():
+        return None
+    for line in candidate.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == key:
+            return v.strip().strip('"').strip("'") or None
+    return None
 
 
 def _read_credentials_file() -> str | None:

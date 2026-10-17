@@ -6,6 +6,7 @@ from bbvastl80.vast.client import VastClient
 # Full base used by the client. Tests register full URLs to avoid any
 # base-URL path-joining ambiguity in the mock.
 BASE = "https://console.vast.ai/api/v0"
+BASE_V1 = "https://console.vast.ai/api/v1"
 
 
 @pytest.fixture

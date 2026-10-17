@@ -31,9 +31,9 @@ def build_search_body(f: GPUFilter, *, limit: int | None = None) -> dict:
     if f.max_dph is not None:
         flt["dph_total"] = {"lte": f.max_dph}
     if f.min_reliability is not None:
-        flt["rel"] = {"gte": f.min_reliability}
+        flt["reliability"] = {"gte": f.min_reliability}
     if f.verified is not None:
-        flt["verified_only"] = {"eq": f.verified}
+        flt["verified"] = {"eq": f.verified}
     if f.datacenter:
         flt["datacenter"] = {"eq": f.datacenter}
     if f.geolocation:

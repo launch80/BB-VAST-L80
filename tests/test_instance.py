@@ -4,7 +4,7 @@ import json
 
 from respx.models import MockResponse
 
-from conftest import BASE
+from conftest import BASE_V1
 from bbvastl80.spec import CustomServing, EngineServing, InstanceSpec, ServingSpec
 from bbvastl80.vast.instance import ProvisionError, rent, rent_body, wait_for_running
 from bbvastl80.vast.models import Instance, Offer
@@ -36,7 +36,7 @@ def test_rent_body_custom_uses_custom_image():
 
 
 def test_rent_returns_instance_id(client, router):
-    router.post(f"{BASE}/asks/11/").mock(
+    router.post(f"{BASE_V1}/asks/11/").mock(
         return_value=MockResponse(200, content=js({"new_contract": 555, "contract_id": 555})))
     inst = rent(client, Offer(id=11, gpu_name="H100"), engine_serving(), InstanceSpec())
     assert inst == 555
@@ -46,7 +46,7 @@ def test_wait_for_running_reaches_running(client, router):
     provisioning = {"id": 555, "status": "provisioning", "type": 0}
     running = {"id": 555, "status": "running", "type": 0, "public_ip": "1.2.3.4",
                "ports": {"8000": 44321, "22": 44322}}
-    router.get(f"{BASE}/instances/555").mock(side_effect=[
+    router.get(f"{BASE_V1}/instances/555").mock(side_effect=[
         MockResponse(200, content=js(provisioning)),
         MockResponse(200, content=js(running)),
     ])
@@ -58,7 +58,7 @@ def test_wait_for_running_reaches_running(client, router):
 
 def test_wait_for_running_survives_404(client, router):
     running = {"id": 555, "status": "running", "type": 0, "public_ip": "9.9.9.9"}
-    router.get(f"{BASE}/instances/555").mock(side_effect=[
+    router.get(f"{BASE_V1}/instances/555").mock(side_effect=[
         MockResponse(404, content=js({"detail": "not found"})),
         MockResponse(200, content=js(running)),
     ])
@@ -67,7 +67,7 @@ def test_wait_for_running_survives_404(client, router):
 
 
 def test_wait_for_running_failed(client, router):
-    router.get(f"{BASE}/instances/555").mock(
+    router.get(f"{BASE_V1}/instances/555").mock(
         return_value=MockResponse(200, content=js({"id": 555, "status": "canceled", "type": 0})))
     import pytest
     with pytest.raises(ProvisionError):
