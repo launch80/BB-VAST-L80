@@ -125,7 +125,14 @@ class InstanceSpec(BaseModel):
     disk_gb: int = Field(200, ge=1)
     runtype: Literal["ssh", "ssh_direct", "ssh_proxy", "jupyter", "args"] = "ssh"
     label: str = "bbvastl80"
-    onstart: str | None = None
+    onstart: str | None = Field(
+        None, description="extra shell run at boot, before the provider's prepare/launch"
+    )
+    bootstrap: Literal["onstart", "ssh"] = Field(
+        "onstart",
+        description="onstart => the provider's bootstrap script is the instance's onstart "
+                    "(starts serving on first boot); ssh => only pushed by `provision`",
+    )
     price: float | None = Field(None, description="bid price $/hr (mode: bid offers only)")
 
 
@@ -161,9 +168,17 @@ class ConnectSpec(BaseModel):
 
 
 class SSHSpec(BaseModel):
-    identity: str | None = Field(None, description="private key path for SSH (transport/tunnel)")
+    """SSH is how every command reaches the box (the Vast execute endpoint
+    only runs ls/rm/du). Defaults find ``~/.ssh/id_ed25519`` (or ecdsa/rsa)
+    and register its ``.pub`` with the account before renting."""
+
+    identity: str | None = Field(
+        None, description="private key path; null => first of ~/.ssh/id_{ed25519,ecdsa,rsa}"
+    )
     user: str = Field("root", description="SSH user on the box")
-    public_key: str | None = Field(None, description="null => use the account's key")
+    public_key: str | None = Field(
+        None, description="public key text or .pub path; null => <identity>.pub"
+    )
 
 
 class LifecycleSpec(BaseModel):

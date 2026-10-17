@@ -22,8 +22,28 @@ def test_rent_body_engine():
     body = rent_body(Offer(id=1, gpu_name="H100"), engine_serving(), InstanceSpec())
     assert body == {
         "client_id": "me", "image": "ghcr.io/vllm/vllm-openai:latest", "disk": 200,
-        "runtype": "ssh", "label": "bbvastl80", "args": ["-p", "8000:8000"],
+        "runtype": "ssh", "label": "bbvastl80", "env": {"-p 8000:8000": "1"},
     }
+
+
+def test_rent_body_bootstrap_script_becomes_onstart():
+    script = "#!/bin/bash\necho hi\n"
+    body = rent_body(Offer(id=1, gpu_name="H100"), engine_serving(),
+                     InstanceSpec(onstart="echo user"), bootstrap=script)
+    assert body["onstart"] == script  # the script embeds the user hook itself
+    body = rent_body(Offer(id=1, gpu_name="H100"), engine_serving(), InstanceSpec(onstart="echo user"))
+    assert body["onstart"] == "echo user"
+
+
+def test_external_port_and_ssh_target_docker_shape():
+    inst = Instance(id=1, actual_status="running", public_ipaddr="9.9.9.9",
+                    ssh_host="ssh5.vast.ai", ssh_port=2222,
+                    ports={"22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "40022"}],
+                           "8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "40800"}]})
+    assert inst.external_port(8000) == 40800
+    assert inst.ssh_target() == ("9.9.9.9", 40022)  # direct mapping wins over the proxy
+    assert Instance(id=2, ssh_host="ssh5.vast.ai", ssh_port=2222).ssh_target() == ("ssh5.vast.ai", 2222)
+    assert Instance(id=3).ssh_target() is None
 
 
 def test_rent_body_custom_uses_custom_image():

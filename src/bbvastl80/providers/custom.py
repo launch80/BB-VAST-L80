@@ -3,8 +3,8 @@
 A custom provider reads the spec's ``serving.custom`` block (``CustomServing``):
 an ``image``, a ``setup`` list of shell commands (run in order on the box), a
 ``start`` command (the server), and a ``health`` probe (path + optional
-substring). Everything runs on the box through the
-:class:`~bbvastl80.providers.base.Box`, so it works with any transport.
+substring). The commands are rendered into the same bootstrap script as the
+presets, so they run from ``onstart`` on first boot and/or over SSH.
 """
 from __future__ import annotations
 
@@ -17,25 +17,22 @@ class CustomProvider(Provider):
 
     name = "custom"
 
-    def prepare(self, box: Box, spec) -> None:
-        cfg = spec.serving.custom
-        for cmd in cfg.setup:
-            r = box.run(cmd, timeout=1800)
-            if not r.ok:
-                from bbvastl80.vast.instance import ProvisionError
-                raise ProvisionError(f"custom 'setup' step failed (rc={r.exit_code}):\n"
-                                     f"  $ {cmd}\n{r.text()}")
+    def prepare_cmds(self, spec) -> list[str]:
+        return list(spec.serving.custom.setup)
 
-    def launch(self, box: Box, spec) -> None:
+    def launch_cmd(self, spec) -> str:
         cfg = spec.serving.custom
         if not cfg.start:
             from bbvastl80.vast.instance import ProvisionError
             raise ProvisionError("a custom provider needs a 'start' command")
-        box.run_detached(cfg.start)
+        return cfg.start
+
+    def health_cmd(self, spec) -> str:
+        return f"curl -sf localhost:{spec.serving.port}{spec.serving.custom.health.path}"
 
     def is_ready(self, box: Box, spec) -> bool:
         cfg = spec.serving.custom
-        r = box.run(f"curl -sf localhost:{spec.serving.port}{cfg.health.path}", timeout=15)
+        r = box.run(self.health_cmd(spec), timeout=15)
         if not r.ok:
             return False
         expects = cfg.health.expects or spec.serving.model_id or spec.model.id

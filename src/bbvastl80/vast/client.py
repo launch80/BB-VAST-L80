@@ -30,8 +30,10 @@ P_BUNDLES = "bundles"            # v0
 P_ASKS = "asks/{id}/"            # v0 (PUT for a single-offer create)
 P_INSTANCE = "instances/{id}"    # v0
 P_INSTANCES = "instances"        # v1 (list)
-P_COMMAND = "instances/command/{id}"   # v0
+P_COMMAND = "instances/command/{id}"   # v0 — constrained: ls / rm / du only
 P_LOGS = "instances/request_logs/{id}"  # v0
+P_SSH_KEYS = "ssh/"                     # v0 — account-level public keys
+P_INSTANCE_SSH = "instances/{id}/ssh/"  # v0 — attach a key to one instance
 
 
 class VastError(Exception):
@@ -81,13 +83,19 @@ class VastClient:
             r = self._http.request(method, url, params=params, json=json)
         except httpx.HTTPError as e:  # network-level failure
             raise VastError(f"network error calling {method} {url}: {e}") from e
-        if r.status_code in (401, 403):
+        if r.status_code == 401:
             raise VastAuthError(
-                f"{method} /{path} -> HTTP {r.status_code} (auth). "
+                f"{method} /{path} -> HTTP 401 (auth). "
                 "Check VAST_API_KEY (scope: instance_read/instance_write)."
             )
         if r.status_code >= 400:
             detail = r.text[:300]
+            # 403 is *not* a key-scope signal on this API: the execute endpoint
+            # uses it for "blacklisted", create-instance for "not your own
+            # machine", and the S3 result URL for "no such object". Surface the
+            # body so the real reason is visible instead of blaming the key.
+            if r.status_code == 403 and ("auth_error" in detail or "Invalid user key" in detail):
+                raise VastAuthError(f"{method} /{path} -> HTTP 403 (auth). Invalid VAST_API_KEY.")
             # Vast reports a bad key as a 404 with {"error": "auth_error"}
             if r.status_code == 404 and ("auth_error" in detail or "Invalid user key" in detail):
                 raise VastAuthError(
@@ -145,26 +153,49 @@ class VastClient:
     def destroy_instance(self, instance_id: int) -> None:
         self._request("DELETE", P_INSTANCE.format(id=instance_id))
 
-    def execute(self, instance_id: int, command: str, timeout: float = 60.0) -> str:
-        """Run a command on an instance and return its output text.
+    # --- SSH keys -----------------------------------------------------------
+    def list_ssh_keys(self) -> list[dict[str, Any]]:
+        data = self._request("GET", P_SSH_KEYS)
+        if isinstance(data, dict):
+            for key in ("ssh_keys", "keys", "results"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+            return []
+        return data if isinstance(data, list) else []
 
-        The ``PUT /instances/command/{id}/`` call is *asynchronous*: it returns a
-        ``result_url`` which we poll (a plain GET to that storage URL — no API
-        auth header, matching the official client) until the box's output is
-        available. If the response carries no ``result_url`` we return its body.
-        The box merges stdout+stderr, so the result is a single text blob.
+    def create_ssh_key(self, public_key: str) -> Any:
+        return self._request("POST", P_SSH_KEYS, json={"ssh_key": public_key})
+
+    def attach_ssh_key(self, instance_id: int, public_key: str) -> Any:
+        return self._request("POST", P_INSTANCE_SSH.format(id=instance_id),
+                             json={"ssh_key": public_key})
+
+    def execute(self, instance_id: int, command: str, timeout: float = 60.0) -> str:
+        """Run a **constrained** command on an instance and return its output.
+
+        ``PUT /instances/command/{id}/`` only accepts ``ls``, ``rm`` and ``du``
+        (per the official ``vastai execute`` help; ``command`` ≤ 512 chars). It
+        is *asynchronous*: the response carries a ``result_url`` (S3) which we
+        poll with a plain GET — no API auth header, matching the official
+        client. S3 answers 403/404 until the object exists, so those are "not
+        yet", not errors. If the response has no ``result_url`` we return its
+        body. The box merges stdout+stderr, so the result is one text blob.
         """
         rj = self._request("PUT", P_COMMAND.format(id=instance_id), json={"command": command})
         result_url = rj.get("result_url") if isinstance(rj, dict) else None
         if not result_url:
             return rj if isinstance(rj, str) else jsonlib.dumps(rj)
         deadline = time.monotonic() + timeout
+        last = None
         while time.monotonic() < deadline:
             time.sleep(0.4)
             rr = httpx.get(result_url, timeout=10)
             if rr.status_code == 200:
                 return rr.text
-        raise VastError(f"command result not ready within {timeout:.0f}s ({command[:60]!r})")
+            last = rr.status_code
+        raise VastError(f"command result not ready within {timeout:.0f}s "
+                        f"(result_url last answered HTTP {last}; the endpoint only runs "
+                        f"ls/rm/du — was {command[:40]!r} allowed?)")
 
     def get_logs(self, instance_id: int, **params: Any) -> Any:
         return self._request("GET", P_LOGS.format(id=instance_id), params=params or None)

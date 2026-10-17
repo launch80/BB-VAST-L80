@@ -12,11 +12,13 @@ engine-agnostic.
 
 ## Status
 
-**Built (M0–M2):** project skeleton, config/doctor, the read-only Vast surface
-(`search`, `list`, `status`), and the rent/teardown lifecycle (`rent`, `destroy`,
-`reap`) with per-run state for resumability. The pipeline commands
-(`serve`, `provision`, `connect`, `bench`, `publish`, `run`) are present as
-stubs so the CLI surface is stable; they light up in M3–M6.
+**Built (M0–M3):** project skeleton, config/doctor, the read-only Vast surface
+(`search`, `list`, `status`), the rent/teardown lifecycle (`rent`, `destroy`,
+`reap`) with per-run state for resumability, and provisioning (`serve`,
+`provision`, `ssh`, `logs`): the provider renders one idempotent bootstrap
+script that ships as the instance's `onstart` and is also pushed over SSH. The
+remaining pipeline commands (`connect`, `bench`, `publish`, `run`) are stubs
+so the CLI surface is stable; they light up in M4–M6.
 
 The Vast client is exercised against the **live API** (search/list/status all
 return clean, actionable errors with a valid key).
@@ -71,8 +73,10 @@ and provision time. `benchmark`/`publish`/`connect`/`lifecycle` round it out.
 | `rent`    | rent an offer, wait until running, save per-run state |
 | `destroy` | tear down an instance (or a run's) — irreversible |
 | `reap`    | destroy every instance carrying our label |
-| `serve`   | *(M3–M4)* rent + provision + connect → a live `/v1` endpoint |
-| `provision` | *(M3)* bootstrap a running box into serving the model |
+| `serve`   | rent + provision → the model serving at `/v1` (connect lands in M4) |
+| `provision` | bootstrap a running box into serving the model (idempotent) |
+| `ssh`     | open a shell on the box, or run one command |
+| `logs`    | tail the bootstrap + server logs on the box |
 | `connect` | *(M4)* resolve the endpoint (direct port or SSH tunnel) + verify `/v1` |
 | `bench`   | *(M5)* run pinned BetterBench against an endpoint → `results.json` |
 | `publish` | *(M5)* publish a `results.json` via the L80 CLI |
@@ -80,9 +84,16 @@ and provision time. `benchmark`/`publish`/`connect`/`lifecycle` round it out.
 
 ## Design notes
 
-- **One contract, any engine.** The provider layer (`providers/`) implements
-  `prepare(box) → launch(box) → is_ready(endpoint)`. Engine presets and the lean
-  custom provider are interchangeable; `serve`/`run` never know which is in use.
+- **One contract, any engine.** A provider (`providers/`) is just
+  `prepare_cmds + launch_cmd + is_ready`; the base class renders them into one
+  idempotent bootstrap script. Engine presets and the lean custom provider are
+  interchangeable; `serve`/`run` never know which is in use.
+- **SSH is the transport; `onstart` is the fast path.** The Vast "execute"
+  endpoint only runs `ls`/`rm`/`du`, so every command reaches a box over SSH.
+  `rent` registers your `~/.ssh/id_ed25519.pub` with the account first and
+  hands the bootstrap script to Vast as `onstart`, so the box starts serving on
+  first boot; `provision` re-runs the same script over SSH (a no-op when
+  healthy, a repair otherwise).
 - **Resumable + crash-safe.** Each run writes `runs/<id>/state.json`. Phases are
   idempotent; `destroy --run <id>` and `reap` work even after a crash.
 - **The 404 trap.** Before publishing, we validate that at least one
@@ -107,10 +118,14 @@ src/bbvastl80/
     models.py       # Offer / Instance / User (tolerant of schema drift)
     offers.py       # build_search_body() + pick_offer()
     instance.py     # rent_body / rent / wait_for_running
+    sshkeys.py      # find local key, register on account, attach to instance
   providers/
-    engines.py      # engine presets: image + (M3) install/launch
-  # M3+ will add: providers/base.py, custom.py, remote.py, box.py, tunnel.py,
-  #               bench.py, publish.py, pipeline.py
-tests/              # 24 tests: spec, offers, client (respx), instance, state
+    base.py         # Box, SSHExecTransport, Provider (+ bootstrap script renderer)
+    engines.py      # vLLM / llama.cpp presets
+    custom.py       # your image + setup[] + start + health
+  bootstrap.py      # render_bootstrap (onstart) + provision (SSH push + wait)
+  # M4+ will add: connect.py (tunnel), bench.py, publish.py, run.py
+tests/              # 59 tests: spec, offers, client (respx), instance, providers,
+                    # bootstrap, sshkeys
 run.example.yaml    # fully-commented starter spec
 ```

@@ -33,6 +33,8 @@ class RunState(BaseModel):
     instance_status: str | None = None
     public_ip: str | None = None
     ports: dict[str, int] = Field(default_factory=dict)  # internal -> external
+    ssh_host: str | None = None
+    ssh_port: int | None = None
     # connectivity
     endpoint: str | None = None
     connect_mode: str | None = None

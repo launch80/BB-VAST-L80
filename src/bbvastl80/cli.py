@@ -1,9 +1,9 @@
 """The bbvastl80 command-line interface.
 
-M0–M2 (this stage): ``init``, ``doctor``, ``search``, ``list``, ``status``,
-``rent``, ``destroy``, ``reap``. The pipeline commands (``serve``,
-``provision``, ``connect``, ``bench``, ``publish``, ``run``) are present as
-stubs so the surface is stable; they light up in M3–M6.
+M0–M3: ``init``, ``doctor``, ``search``, ``list``, ``status``, ``rent``,
+``destroy``, ``reap``, ``serve``, ``provision``, ``ssh``, ``logs``. The
+remaining pipeline commands (``connect``, ``bench``, ``publish``, ``run``) are
+present as stubs so the surface is stable; they light up in M4–M6.
 """
 from __future__ import annotations
 
@@ -14,14 +14,18 @@ import typer
 from rich.table import Table
 
 from bbvastl80 import __version__, log
-from bbvastl80.bootstrap import provision as provision_box
+from bbvastl80.bootstrap import build_box, provision as provision_box, render_bootstrap
 from bbvastl80.config import CRED_FILE, Config, ConfigError
+from bbvastl80.providers.base import BOOTSTRAP_LOG, SERVER_LOG, STATUS_FILE
 from bbvastl80.spec import RunSpec, SpecError, load_spec
 from bbvastl80.state import RunState, StateStore
 from bbvastl80.vast import VastAuthError, VastClient, VastError
 from bbvastl80.vast.instance import ProvisionError, rent as rent_box, wait_for_running
 from bbvastl80.vast.models import Instance, Offer
 from bbvastl80.vast.offers import build_search_body, pick_offer, rank_offers
+from bbvastl80.vast.sshkeys import (
+    attach_key, ensure_account_key, key_body, resolve_identity, resolve_public_key,
+)
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
 
@@ -155,6 +159,26 @@ def doctor(verbose: VERBOSE_OPT = False) -> None:
             f"{CRED_FILE}). Create one at https://cloud.vast.ai/manage-keys/"
         )
 
+    # SSH key (the only way commands reach a box)
+    try:
+        ident = resolve_identity(None)
+        pub = resolve_public_key(None, ident)
+        log.success(f"ssh key: {ident} ({pub.split()[0]})")
+        if cfg.api_key:
+            try:
+                with _client(cfg) as c:
+                    keys = c.list_ssh_keys()
+                have = any(key_body(str(k.get("public_key") or k.get("ssh_key") or ""))
+                           == key_body(pub) for k in keys)
+                (log.success if have else log.warn)(
+                    "ssh public key is registered on the Vast account" if have else
+                    "ssh public key not yet on the Vast account — `rent` registers it "
+                    "automatically (POST /ssh/)")
+            except VastError as e:
+                log.warn(f"could not check account SSH keys: {e}")
+    except ConfigError as e:
+        log.warn(str(e))
+
     # external tools
     bins = cfg.check_binaries()
     for name, path in bins.items():
@@ -259,6 +283,9 @@ def _print_instance(inst: Instance) -> None:
         ext = inst.external_port(port)
         if ext:
             t.add_row(f"port {port}", f"{inst.host_ip}:{ext}" if inst.host_ip else str(ext))
+    target = inst.ssh_target()
+    if target:
+        t.add_row("ssh", f"root@{target[0]} -p {target[1]}")
     if inst.env:
         vast_ports = {k: v for k, v in inst.env.items() if k.startswith("VAST_TCP_PORT_")}
         if vast_ports:
@@ -280,6 +307,23 @@ def _rent_phase(cfg, s, c, offer):
             _fail(f"balance ${user.credit:.2f} < budget ${s.budget.max_total_usd:.2f}; "
                   "top up at https://cloud.vast.ai or lower budget.max_total_usd")
 
+    # SSH key first: Vast injects the account's keys at creation time, so the
+    # public half must be registered *before* we rent.
+    try:
+        ident = resolve_identity(s.ssh.identity)
+        pub = resolve_public_key(s.ssh.public_key, ident)
+        ensure_account_key(c, pub)
+    except ConfigError as e:
+        _fail(str(e))
+    except VastAuthError as e:
+        _fail(str(e))
+    except VastError as e:
+        _fail(f"could not register the SSH key with Vast: {e}")
+    bootstrap = render_bootstrap(s)
+    if bootstrap:
+        log.detail(f"onstart bootstrap: {len(bootstrap)} bytes "
+                   f"(provider '{s.serving.engine.engine if s.serving.engine else 'custom'}')")
+
     if offer is not None:
         candidates = [_offer_from_id(cfg, offer)]
     else:
@@ -297,7 +341,7 @@ def _rent_phase(cfg, s, c, offer):
     for cand in candidates:
         log.info(f"renting offer {cand.id} ({cand.label})")
         try:
-            instance_id = rent_box(c, cand, s.serving, s.instance)
+            instance_id = rent_box(c, cand, s.serving, s.instance, bootstrap)
             chosen = cand
             break
         except VastAuthError as e:
@@ -316,14 +360,18 @@ def _rent_phase(cfg, s, c, offer):
         _fail(f"{e}\n(the instance may still be starting; re-check with "
               f"`bbvastl80 status --instance {instance_id}`)")
 
+    attach_key(c, instance_id, pub)  # belt and braces for Docker instances
+
     store = _state_store(cfg)
     run_id = store.new_run_id(s.name)
     ports = {str(p): inst.external_port(p) for p in (s.serving.port, 22) if inst.external_port(p)}
+    target = inst.ssh_target()
     state = RunState(
         run_id=run_id, status="rented", spec_name=s.name,
         offer_id=chosen.id, offer_label=chosen.label,
         instance_id=instance_id, instance_status=inst.status,
         public_ip=inst.host_ip, ports={k: v for k, v in ports.items() if v},
+        ssh_host=target[0] if target else None, ssh_port=target[1] if target else None,
         dph=chosen.dph_total,
     )
     store.save(state)
@@ -481,6 +529,71 @@ def _report_endpoint(box, s) -> None:
         log.success(f"model '{s.model.id}' is serving at /v1 inside the box")
         log.info("external port not mapped yet — run `bbvastl80 connect` (M4) to "
                  "expose it here")
+    cmd = box.ssh_command()
+    if cmd:
+        log.info("shell: " + " ".join(cmd))
+
+
+def _box_for(cfg, c, s: RunSpec, instance: int | None):
+    """Resolve an instance (explicit or the latest run's) into a Box."""
+    run_id, iid, state = _resolve_target(cfg, instance)
+    try:
+        inst = c.get_instance(iid)
+    except VastError as e:
+        _fail(f"status failed: {e}")
+    return build_box(c, inst, s), inst, state
+
+
+def _spec_or_default(spec_path: Optional[str]) -> RunSpec:
+    """`ssh`/`logs` don't need a spec; fall back to defaults when none given."""
+    if spec_path:
+        return load_spec(spec_path)
+    return RunSpec(model={"id": "_", "hf_repo": "_"})
+
+
+@app.command()
+def ssh(spec: SPEC_OPT = None, instance: INSTANCE_OPT = None,
+        command: Annotated[Optional[str], typer.Argument(help="run this instead of a shell")] = None,
+        verbose: VERBOSE_OPT = False) -> None:
+    """Open a shell on the box (or run one command). Prints the ssh line used."""
+    cfg = _cfg()
+    try:
+        s = _spec_or_default(spec)
+    except SpecError as e:
+        _fail(str(e))
+    with _client(cfg) as c:
+        box, inst, _state = _box_for(cfg, c, s, instance)
+    argv = box.ssh_command()
+    if not argv:
+        _fail(f"instance {inst.id} has no SSH host/port yet (status '{inst.status}')")
+    argv = argv + ([command] if command else [])
+    log.info("$ " + " ".join(argv))
+    raise typer.Exit(subprocess.call(argv))
+
+
+@app.command()
+def logs(spec: SPEC_OPT = None, instance: INSTANCE_OPT = None,
+         lines: Annotated[int, typer.Option("--lines", "-n")] = 60,
+         verbose: VERBOSE_OPT = False) -> None:
+    """Tail the bootstrap + server logs on the box (over SSH)."""
+    cfg = _cfg()
+    try:
+        s = _spec_or_default(spec)
+    except SpecError as e:
+        _fail(str(e))
+    with _client(cfg) as c:
+        box, inst, _state = _box_for(cfg, c, s, instance)
+    if not box.ssh_host:
+        _fail(f"instance {inst.id} has no SSH host/port yet (status '{inst.status}')")
+    r = box.run(
+        f"echo \"status: $(cat {STATUS_FILE} 2>/dev/null || echo none)\"; "
+        f"echo '--- {BOOTSTRAP_LOG}'; tail -n {lines} {BOOTSTRAP_LOG} 2>/dev/null; "
+        f"echo '--- {SERVER_LOG}'; tail -n {lines} {SERVER_LOG} 2>/dev/null",
+        timeout=30,
+    )
+    if not r.ok and not r.stdout:
+        _fail(f"ssh failed (rc={r.exit_code}): {r.stderr.strip()[:200]}")
+    log.console().print(r.stdout.rstrip())
 
 
 @app.command()

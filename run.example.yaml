@@ -62,7 +62,8 @@ instance:
   disk_gb: 200
   runtype: ssh                              # ssh | ssh_direct | ssh_proxy
   label: bbvastl80
-  # onstart: "echo provisioning"            # optional extra boot command
+  # onstart: "echo provisioning"            # extra shell at boot, before the engine bootstrap
+  bootstrap: onstart                        # onstart (serve from first boot) | ssh (only via `provision`)
   # price: 1.5                              # bid $/hr (for gpu.type: bid)
 
 benchmark:
@@ -89,8 +90,10 @@ connect:
   mode: auto                                # auto | direct | tunnel
   local_port: 8000
 
-ssh:
-  # public_key: "ssh-ed25519 AAAA… you"     # null => use the account's key
+ssh:                                        # every command reaches the box over SSH
+  # identity: ~/.ssh/id_ed25519             # null => first of ~/.ssh/id_{ed25519,ecdsa,rsa}
+  # public_key: "ssh-ed25519 AAAA… you"     # key text or .pub path; null => <identity>.pub
+  # user: root
 
 lifecycle:
   teardown: auto                            # auto | manual

@@ -75,9 +75,9 @@ published OpenAPI spec):
 | rent an offer | `POST /asks/{offer_id}/` → returns `new_contract` (instance id) |
 | instance status / ip / ports | `GET /instances/{id}` |
 | list my instances | `GET /instances` |
-| execute a command on the box | `PUT /instances/command/{id}` body `{command}` → result URL |
+| run a command on the box | **SSH** (`root@<ip> -p <22/tcp external>`, else `ssh_host:ssh_port`). `PUT /instances/command/{id}` only runs `ls`/`rm`/`du` |
+| register / attach SSH public key | `POST /ssh/` (account) · `POST /instances/{id}/ssh/` (one instance), body `{ssh_key}` |
 | destroy (irreversible) | `DELETE /instances/{id}` |
-| attach / list SSH keys | `POST /instances/{id}/ssh/{key_id}`, `GET/POST /ssh` |
 | change bid | `PUT /instances/bid_price/{id}` |
 | logs | `GET /instances/request_logs/{id}` |
 
@@ -96,7 +96,9 @@ lt lte in notin`): `gpu_name`, `num_gpus`, `gpu_total_ram`, `dph_total`,
 **Networking model (the crux of connectivity):**
 - Vast docker boxes share a public IP; each *internal* port is mapped to a
   *random external* port. `runtype: ssh` opens internal 22.
-- We open the serving port too: `args: ["-p", "8000:8000"]`.
+- We open the serving port too — in `env`, the way the official CLI does:
+  `env: {"-p 8000:8000": "1"}` (`args` is the container command line, not
+  docker flags).
 - The instance reports its mappings as env vars: `VAST_TCP_PORT_22`
   (external SSH port) and `VAST_TCP_PORT_8000` (external serving port).
 - Two ways back to us:
@@ -286,22 +288,36 @@ run is **resumable** and teardown works days later. Phases:
    `budget.max_provision_min`. Surface Vast logs on timeout
    (`GET /instances/request_logs/{id}`).
 
-6. **provision** — push + run an **engine-aware bootstrap script** on the box
-   via `PUT /instances/command/{id}` (base64 the script → write → `bash`).
-   The script: installs the engine if the image lacks it, pulls the model
-   (`hf` repo / URL / path), and starts the server bound to `0.0.0.0:<port>`
-   with `max_model_len` / `gpu_mem_util` / `extra_args`. The execute response
-   gives a result URL → poll for completion. Then poll
-   `GET …/v1/models` (via the connectivity endpoint) until the `model.id`
-   appears.
-   - Engine registry (`provision/engines.py`) maps each engine to
-     `{default_image, install_cmd, launch_cmd}`:
-     - `vllm`: `vllm serve <repo> --port 8000 --max-model-len N --gpu-memory-utilization U [--tensor-parallel-size count]`
-     - `llamacpp`: `llama-server -m <model.gguf> --port 8000 --ctx-size N`
-     - `sglang`: `python -m sglang.launch_server --model-path … --port 8000`
-     - `tgi` / `ollama`: their standard serve commands
-   - Fallback: if the execute endpoint is unavailable, SSH in and run the
-     same script (same script, two transports).
+6. **provision** — bring the box to a live `/v1` with an **engine-aware
+   bootstrap script** that the provider renders (`Provider.script`). The
+   script installs the engine if the image lacks it, stages weights (`hf`
+   repo / URL), starts the server bound to `0.0.0.0:<port>` with
+   `max_model_len` / `gpu_mem_util` / `extra_args` under `setsid nohup`, and
+   is **idempotent** (exits if `/v1` already answers or a launch is in flight).
+   It reaches the box two ways — same script, two deliveries:
+   - **`onstart`** (default, `instance.bootstrap: onstart`) — the script *is*
+     the instance's `onstart`, so Vast runs it on first boot and the box is
+     usually pulling weights before it even reports `running`.
+   - **SSH** — `provision` always pushes the script (`base64 -d`) and runs it
+     over SSH too; thanks to idempotency this is a no-op on a healthy box and
+     a repair on a box whose onstart never ran (resume, `bootstrap: ssh`).
+   Then poll `curl localhost:<port>/v1/models` *inside* the box until it
+   answers; on failure, dump `/tmp/bbvastl80/{bootstrap,server}.log`.
+   - **The Vast execute endpoint is NOT a shell.** `PUT /instances/command/{id}`
+     is constrained to `ls`, `rm` and `du` (per the official `vastai execute`
+     help; `command` ≤ 512 chars). Anything else never produces output, and the
+     S3 `result_url` then answers 403 — which is what blocked M3 and looked like
+     an auth problem. It is kept only as a read-only sanity helper.
+   - **SSH keys.** The account's public keys are injected at creation, so
+     `rent` registers `~/.ssh/id_ed25519.pub` (or `ssh.identity`/`public_key`)
+     via `POST /ssh/` *before* renting, and attaches it to the instance after
+     (`POST /instances/{id}/ssh/`) as belt-and-braces. SSH target = direct
+     `22/tcp` mapping on the public IP, else Vast's proxy `ssh_host:ssh_port`.
+   - Engine registry (`providers/engines.py`) maps each engine to
+     `{default_image, prepare_cmds, launch_cmd}`:
+     - `vllm`: `vllm serve <repo> --served-model-name <id> --host 0.0.0.0 --port 8000 --max-model-len N --gpu-memory-utilization U [--tensor-parallel-size count]`
+     - `llamacpp`: `llama-server -m <model.gguf> --host 0.0.0.0 --port 8000 --alias <id> -c N`
+     - `sglang` / `tgi` / `ollama`: M7
 
 7. **connect** — resolve the local endpoint:
    - `mode: direct` (or auto + a public 8000 port exists) →
@@ -365,7 +381,8 @@ BB-VAST-L80/
 │   │   ├── client.py               # httpx client: auth header, retries, typed errors
 │   │   ├── models.py               # pydantic models for the /api/v0 responses
 │   │   ├── offers.py               # build /bundles filters, rank, pick
-│   │   └── instance.py             # rent, poll, execute, ssh-keys, destroy, logs
+│   │   ├── instance.py             # rent (+onstart bootstrap), poll, destroy
+│   │   └── sshkeys.py              # find local key, register on account, attach to instance
 │   ├── providers/
 │   │   ├── base.py                 # Provider contract: prepare / launch / is_ready
 │   │   ├── engines.py              # built-in presets: vllm/llamacpp/sglang/tgi/ollama
@@ -430,7 +447,9 @@ the "all requests failed → don't publish" guard.
 > `type` is a plain enum; `verified`/`reliability`/`min_network_*` are operator
 > objects; endpoints 301-redirect to a trailing slash (client follows); a bad
 > key is a 404 with `{"error":"auth_error"}`. `rent` tries the next ranked offer
-> when one is stale. Next up: **M3 (provision)**.
+> when one is stale. **M3 built** on SSH + `onstart` after the execute-endpoint
+> approach proved impossible (it only runs `ls/rm/du`; 403s came from its S3
+> result URL, not from the key). Next up: live-validate M3, then **M4 (connect)**.
 
 - **M0 — skeleton.** `pyproject`, package layout, `typer` CLI, `config.py`,
   `spec.py` (full pydantic model + defaults), `init` + `doctor`. ✅ done
@@ -439,8 +458,11 @@ the "all requests failed → don't publish" guard.
 - **M2 — rent + lifecycle.** `instance.py` (rent, poll, destroy, logs),
   cost guard; commands `rent`, `destroy`, `reap`. ✅ done, live-validated
   (real rent→poll→destroy round-trip; `PUT /asks/{id}/`+`client_id` contract)
-- **M3 — provision.** `engines.py` (vLLM + llama.cpp first), `bootstrap.py`,
-  execute-endpoint transport (+SSH fallback); command `provision`.
+- **M3 — provision.** `engines.py` (vLLM + llama.cpp), `bootstrap.py`,
+  provider-rendered bootstrap script delivered as `onstart` + over SSH; SSH key
+  registration; commands `provision`, `ssh`, `logs`. ✅ built (59 tests);
+  **needs one live rent→serve run to validate** (the execute-endpoint design it
+  replaces was a dead end — see §4 step 6).
 - **M4 — connect.** `connect.py`: direct + tunnel, `ssh -F` config, `/v1`
   verification, clean shutdown; command `connect`.
 - **M5 — bench + publish.** `bench.py` (spawn pinned harness + validation

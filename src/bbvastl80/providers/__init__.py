@@ -8,8 +8,10 @@ Two layers:
   :class:`~bbvastl80.providers.base.Provider` (a curated engine preset or your
   custom stack) that drives the box to a live ``/v1`` (M3).
 
-The transport that carries commands to the box is chosen by :func:`make_transport`
-(Vast execute endpoint by default, SSH as a fallback).
+Commands reach the box over SSH (:func:`make_transport`); the provider's
+bootstrap script additionally rides along as the instance's ``onstart`` so a
+box starts serving on first boot. The Vast execute endpoint is constrained to
+``ls``/``rm``/``du`` and is never used for provisioning.
 """
 from bbvastl80.providers.base import (
     Box,

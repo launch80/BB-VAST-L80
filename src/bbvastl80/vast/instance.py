@@ -19,7 +19,17 @@ class ProvisionError(Exception):
     """The instance reached a failed terminal state (or we gave up waiting)."""
 
 
-def rent_body(offer: Offer, serving: ServingSpec, instance: InstanceSpec) -> dict:
+def rent_body(offer: Offer, serving: ServingSpec, instance: InstanceSpec,
+              bootstrap: str | None = None) -> dict:
+    """The ``PUT /asks/{id}/`` payload.
+
+    Port mappings travel in ``env`` exactly as the official CLI sends them
+    (``{"-p 8000:8000": "1"}``) — ``args`` is the container *command* line, not
+    docker flags. ``bootstrap`` (the provider's rendered script) becomes the
+    instance's ``onstart``, so the box begins serving on first boot without
+    any transport; a plain ``instance.onstart`` string is used when no script
+    is given (the script already embeds it otherwise).
+    """
     port = resolve_port(serving)
     body: dict = {
         "client_id": "me",  # required by the asks endpoint (see vast-cli)
@@ -27,10 +37,12 @@ def rent_body(offer: Offer, serving: ServingSpec, instance: InstanceSpec) -> dic
         "disk": instance.disk_gb,
         "runtype": instance.runtype,
         "label": instance.label,
-        # open the serving port (and 22 is implicit for the ssh runtypes)
-        "args": ["-p", f"{port}:{port}"],
+        # open the serving port (22 is implicit for the ssh runtypes)
+        "env": {f"-p {port}:{port}": "1"},
     }
-    if instance.onstart:
+    if bootstrap:
+        body["onstart"] = bootstrap
+    elif instance.onstart:
         body["onstart"] = instance.onstart
     if instance.price is not None:  # honoured for bid/interruptible offers
         body["price"] = instance.price
@@ -38,11 +50,12 @@ def rent_body(offer: Offer, serving: ServingSpec, instance: InstanceSpec) -> dic
 
 
 def rent(client: VastClient, offer: Offer, serving: ServingSpec,
-         instance: InstanceSpec) -> int:
+         instance: InstanceSpec, bootstrap: str | None = None) -> int:
     """Rent ``offer``; returns the new instance (contract) id."""
-    body = rent_body(offer, serving, instance)
+    body = rent_body(offer, serving, instance, bootstrap)
     log.detail(f"renting offer {offer.id} ({offer.label}) image={body['image']} "
-               f"disk={body['disk']}GB runtype={body['runtype']}")
+               f"disk={body['disk']}GB runtype={body['runtype']} "
+               f"onstart={'bootstrap script' if bootstrap else bool(instance.onstart)}")
     return client.create_instance(offer.id, body)
 
 

@@ -109,7 +109,10 @@ class Instance(BaseModel):
         """Map an internal container port to its (random) external port.
 
         Primary source is the ``env`` the API populates (``VAST_TCP_PORT_<n>``);
-        we fall back to a ``ports`` list/dict of {internal, external} pairs.
+        we fall back to ``ports``, which the live API returns in Docker's
+        shape (``{"22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "41234"}]}``) and
+        which tests/older records may give as ``{internal: external}`` or a
+        list of ``{internal, external}`` pairs.
         """
         key = f"VAST_TCP_PORT_{internal}"
         if self.env and self.env.get(key):
@@ -127,9 +130,23 @@ class Instance(BaseModel):
                     continue
         elif isinstance(ports, dict):
             for k, v in ports.items():
-                if str(k) == str(internal):
-                    try:
-                        return int(v)
-                    except (TypeError, ValueError):
-                        return None
+                if str(k).split("/")[0] != str(internal):
+                    continue
+                try:
+                    if isinstance(v, list):  # Docker shape
+                        return int(v[0]["HostPort"]) if v else None
+                    return int(v)
+                except (TypeError, ValueError, KeyError, IndexError):
+                    return None
+        return None
+
+    def ssh_target(self) -> tuple[str, int] | None:
+        """``(host, port)`` to SSH into, resolved the way the official CLI does:
+        a direct mapping of container port 22 on the public IP wins; otherwise
+        Vast's SSH proxy (``ssh_host``/``ssh_port``)."""
+        direct = self.external_port(22)
+        if direct and self.host_ip:
+            return self.host_ip, direct
+        if self.ssh_host and self.ssh_port:
+            return self.ssh_host, int(self.ssh_port)
         return None
