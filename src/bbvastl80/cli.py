@@ -14,6 +14,7 @@ import typer
 from rich.table import Table
 
 from bbvastl80 import __version__, log
+from bbvastl80.bootstrap import provision as provision_box
 from bbvastl80.config import CRED_FILE, Config, ConfigError
 from bbvastl80.spec import RunSpec, SpecError, load_spec
 from bbvastl80.state import RunState, StateStore
@@ -59,6 +60,30 @@ def _fail(msg: str) -> None:
 def _offer_from_id(cfg: Config, offer_id: int) -> Offer:
     # Minimal offer when the user supplies an id directly (no search).
     return Offer(id=offer_id, gpu_name=f"offer-{offer_id}")
+
+
+def _resolve_target(cfg: Config, instance: int | None):
+    """Find the (run_id, instance_id, state) to provision.
+
+    An explicit ``--instance`` wins; otherwise the most recent run that rented a
+    box is used. Returns ``None``-able pieces so the caller can give a precise
+    error.
+    """
+    store = _state_store(cfg)
+    if instance is not None:
+        state = None
+        for rid in store.list_run_ids():
+            st = store.load(rid)
+            if st.instance_id == instance:
+                state = st
+                break
+        return (state.run_id if state else None), instance, state
+    for rid in store.list_run_ids():
+        st = store.load(rid)
+        if st.instance_id:
+            return rid, st.instance_id, st
+    _fail("no instance to provision — rent one first (`bbvastl80 rent -s …`) "
+          "or pass --instance <id>")
 
 
 def _print_offers(offers: list[Offer], chosen: Offer | None) -> None:
@@ -242,6 +267,69 @@ def _print_instance(inst: Instance) -> None:
 
 
 # --- M2: rent / destroy / reap ----------------------------------------------
+def _rent_phase(cfg, s, c, offer):
+    """Cost guard → search → rent (try the next offer on a stale one) → wait for
+    running → save state. Returns ``(store, run_id, state, chosen, instance)``.
+    Shared by ``rent`` and ``serve``."""
+    if s.budget.max_total_usd is not None:
+        try:
+            user = c.get_user()
+        except VastAuthError as e:
+            _fail(str(e))
+        if user.credit is not None and user.credit < s.budget.max_total_usd:
+            _fail(f"balance ${user.credit:.2f} < budget ${s.budget.max_total_usd:.2f}; "
+                  "top up at https://cloud.vast.ai or lower budget.max_total_usd")
+
+    if offer is not None:
+        candidates = [_offer_from_id(cfg, offer)]
+    else:
+        try:
+            offers = c.search_offers(build_search_body(s.gpu))
+        except VastError as e:
+            _fail(f"search failed: {e}")
+        if not offers:
+            _fail("no offers matched — relax the gpu filter")
+        candidates = rank_offers(offers, s.gpu.pick)
+        if not candidates:
+            _fail("no offer selected")
+
+    chosen, instance_id, last_err = None, None, None
+    for cand in candidates:
+        log.info(f"renting offer {cand.id} ({cand.label})")
+        try:
+            instance_id = rent_box(c, cand, s.serving, s.instance)
+            chosen = cand
+            break
+        except VastAuthError as e:
+            _fail(str(e))  # an auth problem won't clear by trying another offer
+        except VastError as e:
+            last_err = e
+            log.detail(f"  offer {cand.id} not rentable ({' '.join(str(e).split())[:90]}) — trying next")
+    if instance_id is None:
+        _fail(f"no offer could be rented ({len(candidates)} tried): {last_err}")
+
+    log.info(f"instance {instance_id} created — waiting up to "
+             f"{s.budget.max_provision_min:.0f} min for it to run…")
+    try:
+        inst = wait_for_running(c, instance_id, timeout_min=s.budget.max_provision_min)
+    except ProvisionError as e:
+        _fail(f"{e}\n(the instance may still be starting; re-check with "
+              f"`bbvastl80 status --instance {instance_id}`)")
+
+    store = _state_store(cfg)
+    run_id = store.new_run_id(s.name)
+    ports = {str(p): inst.external_port(p) for p in (s.serving.port, 22) if inst.external_port(p)}
+    state = RunState(
+        run_id=run_id, status="rented", spec_name=s.name,
+        offer_id=chosen.id, offer_label=chosen.label,
+        instance_id=instance_id, instance_status=inst.status,
+        public_ip=inst.host_ip, ports={k: v for k, v in ports.items() if v},
+        dph=chosen.dph_total,
+    )
+    store.save(state)
+    return store, run_id, state, chosen, inst
+
+
 @app.command()
 def rent(spec: SPEC_OPT = None, offer: OFFER_OPT = None, verbose: VERBOSE_OPT = False) -> None:
     """Rent an offer (or search for one), wait until it's running, save state."""
@@ -250,78 +338,9 @@ def rent(spec: SPEC_OPT = None, offer: OFFER_OPT = None, verbose: VERBOSE_OPT = 
         s = _spec(spec)
     except (SpecError, ConfigError) as e:
         _fail(str(e))
-
     with _client(cfg) as c:
-        # cost guard
-        if s.budget.max_total_usd is not None:
-            try:
-                user = c.get_user()
-            except VastAuthError as e:
-                _fail(str(e))
-            if user.credit is not None and user.credit < s.budget.max_total_usd:
-                _fail(f"balance ${user.credit:.2f} < budget ${s.budget.max_total_usd:.2f}; "
-                      "top up at https://cloud.vast.ai or lower budget.max_total_usd")
-
-        # choose candidate offers (ranked by the pick strategy)
-        if offer is not None:
-            candidates = [_offer_from_id(cfg, offer)]
-        else:
-            try:
-                offers = c.search_offers(build_search_body(s.gpu))
-            except VastError as e:
-                _fail(f"search failed: {e}")
-            if not offers:
-                _fail("no offers matched — relax the gpu filter")
-            candidates = rank_offers(offers, s.gpu.pick)
-            if not candidates:
-                _fail("no offer selected")
-
-        # Rent. Offers vanish fast on the open market, so try candidates in
-        # order until one takes; a "not available"/stale offer just moves on.
-        chosen, instance_id, last_err = None, None, None
-        for cand in candidates:
-            log.info(f"renting offer {cand.id} ({cand.label})")
-            try:
-                instance_id = rent_box(c, cand, s.serving, s.instance)
-                chosen = cand
-                break
-            except VastAuthError as e:
-                _fail(str(e))  # an auth problem won't clear by trying another offer
-            except VastError as e:
-                last_err = e
-                log.detail(f"  offer {cand.id} not rentable ({' '.join(str(e).split())[:90]}) — trying next")
-        if instance_id is None:
-            _fail(f"no offer could be rented ({len(candidates)} tried): {last_err}")
-
-        # wait for running
-        log.info(f"instance {instance_id} created — waiting up to "
-                 f"{s.budget.max_provision_min:.0f} min for it to run…")
-        try:
-            inst = wait_for_running(c, instance_id, timeout_min=s.budget.max_provision_min)
-        except ProvisionError as e:
-            _fail(f"{e}\n(the instance may still be starting; re-check with "
-                  f"`bbvastl80 status --instance {instance_id}`)")
-
-        # persist state
-        store = _state_store(cfg)
-        run_id = store.new_run_id(s.name)
-        ports = {str(p): inst.external_port(p)
-                 for p in (s.serving.port, 22) if inst.external_port(p)}
-        state = RunState(
-            run_id=run_id,
-            status="rented",
-            spec_name=s.name,
-            offer_id=chosen.id,
-            offer_label=chosen.label,
-            instance_id=instance_id,
-            instance_status=inst.status,
-            public_ip=inst.host_ip,
-            ports={k: v for k, v in ports.items() if v},
-            dph=chosen.dph_total,
-        )
-        store.save(state)
-
-        log.success(f"instance {instance_id} is RUNNING · run id: {run_id}")
+        store, run_id, state, _chosen, inst = _rent_phase(cfg, s, c, offer)
+        log.success(f"instance {state.instance_id} is RUNNING · run id: {run_id}")
         _print_instance(inst)
         log.info(f"state: {store.path_for(run_id)}")
 
@@ -398,15 +417,70 @@ def _stub(what: str, milestone: str) -> None:
 @app.command()
 def serve(spec: SPEC_OPT = None, offer: OFFER_OPT = None, instance: INSTANCE_OPT = None,
           verbose: VERBOSE_OPT = False) -> None:
-    """Offload: rent + provision + connect, then print a live /v1 endpoint."""
-    _stub("serve", "M3–M4")
+    """Offload: rent (if needed) + provision the model, then report the /v1.
+
+    This is the reusable "rent a GPU and get a live endpoint" primitive. Making
+    the port reachable from this machine (direct vs SSH tunnel) is ``connect``.
+    """
+    cfg = _cfg()
+    try:
+        s = _spec(spec)
+    except (SpecError, ConfigError) as e:
+        _fail(str(e))
+    with _client(cfg) as c:
+        if instance is not None:
+            run_id, iid, state = _resolve_target(cfg, instance)
+        else:
+            store, run_id, state, _chosen, _inst = _rent_phase(cfg, s, c, offer)
+            iid = state.instance_id
+        inst = c.get_instance(iid)
+        if not inst.is_running:
+            log.info(f"instance {iid} is '{inst.status}' — waiting for it to run…")
+            inst = wait_for_running(c, iid, timeout_min=s.budget.max_provision_min)
+        box = provision_box(c, inst, s)
+        if state is not None:
+            state.status = "provisioned"
+            state.public_ip = box.host_ip
+            state.ports = {**state.ports, **box.ports}
+            state.endpoint = box.url()
+            _state_store(cfg).save(state)
+        _report_endpoint(box, s)
 
 
 @app.command()
 def provision(spec: SPEC_OPT = None, instance: INSTANCE_OPT = None,
               verbose: VERBOSE_OPT = False) -> None:
-    """Bootstrap a running box into serving the spec's model."""
-    _stub("provision", "M3")
+    """Bootstrap a running box (from a prior rent, or --instance) into serving
+    the spec's model; confirms the /v1 endpoint answers inside the box."""
+    cfg = _cfg()
+    try:
+        s = _spec(spec)
+    except (SpecError, ConfigError) as e:
+        _fail(str(e))
+    with _client(cfg) as c:
+        run_id, iid, state = _resolve_target(cfg, instance)
+        inst = c.get_instance(iid)
+        if not inst.is_running:
+            log.info(f"instance {iid} is '{inst.status}' — waiting for it to run…")
+            inst = wait_for_running(c, iid, timeout_min=s.budget.max_provision_min)
+        box = provision_box(c, inst, s)
+        if state is not None:
+            state.status = "provisioned"
+            state.instance_id = iid
+            state.public_ip = box.host_ip
+            state.ports = {**state.ports, **box.ports}
+            state.endpoint = box.url()
+            _state_store(cfg).save(state)
+        _report_endpoint(box, s)
+
+
+def _report_endpoint(box, s) -> None:
+    if box.url():
+        log.success(f"live endpoint: {box.url()}/v1  (model '{s.model.id}')")
+    else:
+        log.success(f"model '{s.model.id}' is serving at /v1 inside the box")
+        log.info("external port not mapped yet — run `bbvastl80 connect` (M4) to "
+                 "expose it here")
 
 
 @app.command()

@@ -421,19 +421,24 @@ the "all requests failed → don't publish" guard.
 
 ## 7. Milestones (build order)
 
-> **Status (2025):** M0–M2 are **built, tested (24 tests), pyflakes-clean, and
-> verified against the live Vast API** (search/list/status/rent all return clean
-> errors with a valid key). Live-API findings baked in: `order` is a list of
-> `[field, dir]` tuples, `type` is a plain enum, endpoints 301-redirect to a
-> trailing slash (client follows redirects), and a bad key is a 404 with
-> `{"error":"auth_error"}`. Next up: **M3 (provision)**.
+> **Status (2025):** M0–M2 are **built, tested (26 tests), pyflakes-clean, and
+> live-validated** against the real Vast API. A real rental was executed
+> end-to-end (rent → poll → destroy, box confirmed gone). Live-API contract
+> findings baked in: create is `PUT /asks/{id}/` with `client_id:"me"` (v0);
+> `get`/`destroy` are v0 (record fields `actual_status`/`public_ipaddr`);
+> `list` is the only v1 endpoint; `order` is a list of `[field,dir]` tuples;
+> `type` is a plain enum; `verified`/`reliability`/`min_network_*` are operator
+> objects; endpoints 301-redirect to a trailing slash (client follows); a bad
+> key is a 404 with `{"error":"auth_error"}`. `rent` tries the next ranked offer
+> when one is stale. Next up: **M3 (provision)**.
 
 - **M0 — skeleton.** `pyproject`, package layout, `typer` CLI, `config.py`,
   `spec.py` (full pydantic model + defaults), `init` + `doctor`. ✅ done
 - **M1 — read-only Vast.** `vast/client.py`, `offers.py`, `models.py`;
   commands `search`, `list`, `status`. Safe to hit the real API first. ✅ done
 - **M2 — rent + lifecycle.** `instance.py` (rent, poll, destroy, logs),
-  cost guard; commands `rent`, `destroy`, `reap`. ✅ done
+  cost guard; commands `rent`, `destroy`, `reap`. ✅ done, live-validated
+  (real rent→poll→destroy round-trip; `PUT /asks/{id}/`+`client_id` contract)
 - **M3 — provision.** `engines.py` (vLLM + llama.cpp first), `bootstrap.py`,
   execute-endpoint transport (+SSH fallback); command `provision`.
 - **M4 — connect.** `connect.py`: direct + tunnel, `ssh -F` config, `/v1`

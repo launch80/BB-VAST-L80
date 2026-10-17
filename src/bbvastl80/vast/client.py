@@ -17,6 +17,7 @@ is no RFC-3986 path-joining ambiguity.
 from __future__ import annotations
 
 import json as jsonlib
+import time
 from typing import Any
 
 import httpx
@@ -144,9 +145,26 @@ class VastClient:
     def destroy_instance(self, instance_id: int) -> None:
         self._request("DELETE", P_INSTANCE.format(id=instance_id))
 
-    def execute(self, instance_id: int, command: str) -> Any:
-        """Queue a command on the box; returns the API response (has a result URL)."""
-        return self._request("PUT", P_COMMAND.format(id=instance_id), json={"command": command})
+    def execute(self, instance_id: int, command: str, timeout: float = 60.0) -> str:
+        """Run a command on an instance and return its output text.
+
+        The ``PUT /instances/command/{id}/`` call is *asynchronous*: it returns a
+        ``result_url`` which we poll (a plain GET to that storage URL — no API
+        auth header, matching the official client) until the box's output is
+        available. If the response carries no ``result_url`` we return its body.
+        The box merges stdout+stderr, so the result is a single text blob.
+        """
+        rj = self._request("PUT", P_COMMAND.format(id=instance_id), json={"command": command})
+        result_url = rj.get("result_url") if isinstance(rj, dict) else None
+        if not result_url:
+            return rj if isinstance(rj, str) else jsonlib.dumps(rj)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.4)
+            rr = httpx.get(result_url, timeout=10)
+            if rr.status_code == 200:
+                return rr.text
+        raise VastError(f"command result not ready within {timeout:.0f}s ({command[:60]!r})")
 
     def get_logs(self, instance_id: int, **params: Any) -> Any:
         return self._request("GET", P_LOGS.format(id=instance_id), params=params or None)

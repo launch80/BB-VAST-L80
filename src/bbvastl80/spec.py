@@ -161,6 +161,8 @@ class ConnectSpec(BaseModel):
 
 
 class SSHSpec(BaseModel):
+    identity: str | None = Field(None, description="private key path for SSH (transport/tunnel)")
+    user: str = Field("root", description="SSH user on the box")
     public_key: str | None = Field(None, description="null => use the account's key")
 
 
