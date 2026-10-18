@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 # --- GPU selection -----------------------------------------------------------
@@ -52,6 +52,10 @@ class ModelSpec(BaseModel):
 
 
 # --- Serving (the pluggable provider) ---------------------------------------
+# Engines with a working preset in providers/engines.py.
+ENGINE_PRESETS = ("vllm", "llamacpp")
+
+
 class EngineServing(BaseModel):
     """mode: engine — a preset. We generate install + launch for you."""
 
@@ -60,6 +64,17 @@ class EngineServing(BaseModel):
     max_model_len: int | None = None
     gpu_mem_util: float | None = Field(None, ge=0.1, le=1.0)
     extra_args: list[str] = Field(default_factory=list)
+
+    @field_validator("engine")
+    @classmethod
+    def _engine_has_preset(cls, v: str) -> str:
+        # Reserved in the schema, but there is no preset to provision them yet.
+        if v not in ENGINE_PRESETS:
+            raise ValueError(
+                f"engine {v!r} has no preset yet; available: {', '.join(ENGINE_PRESETS)}. "
+                "Use serving.mode: custom with your own image and start command."
+            )
+        return v
 
 
 class HealthSpec(BaseModel):

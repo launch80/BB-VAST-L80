@@ -47,7 +47,7 @@ class Config:
         return cls(
             api_key=api_key,
             api_base=(api_base or DEFAULT_API_BASE).rstrip("/"),
-            l80_bin=os.environ.get("L80_BIN", "l80"),
+            l80_bin=os.environ.get("L80_BIN") or _default_l80(),
             betterbench_bin=os.environ.get(
                 "L80_BETTERBENCH",
                 str(_which("betterbench") or "betterbench"),
@@ -60,8 +60,8 @@ class Config:
             raise ConfigError(
                 "No Vast.ai API key found.\n"
                 "  1. Create one at https://cloud.vast.ai/manage-keys/\n"
-                "  2. export VAST_API_KEY=<key>   (or put it in .env)\n"
-                f"     — or write it to {CRED_FILE}"
+                f"  2. write it to {CRED_FILE}   (works from any directory)\n"
+                "     — or export VAST_API_KEY=<key>, or put it in ./.env"
             )
         return self.api_key
 
@@ -104,13 +104,25 @@ def _read_credentials_file() -> str | None:
             return str(json.loads(text).get("api_key", "")).strip() or None
         except json.JSONDecodeError:
             return None
-    # plain-text form: first non-comment, non-empty line
+    # plain-text form: first non-comment, non-empty line, either the bare key
+    # or ``api_key=<key>`` / ``VAST_API_KEY=<key>``
     for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
+            k, sep, v = line.partition("=")
+            if sep and k.strip().lower() in ("api_key", "vast_api_key"):
+                return v.strip().strip('"').strip("'") or None
             return line
     return None
 
 
 def _which(name: str) -> str | None:
     return shutil.which(name)
+
+
+def _default_l80() -> str:
+    """The L80 binary is ``L80``; some installs also link a lowercase ``l80``."""
+    for name in ("L80", "l80"):
+        if _which(name):
+            return name
+    return "L80"

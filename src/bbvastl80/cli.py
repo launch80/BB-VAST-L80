@@ -1,9 +1,8 @@
 """The bbvastl80 command-line interface.
 
-M0–M3: ``init``, ``doctor``, ``search``, ``list``, ``status``, ``rent``,
-``destroy``, ``reap``, ``serve``, ``provision``, ``ssh``, ``logs``. The
-remaining pipeline commands (``connect``, ``bench``, ``publish``, ``run``) are
-present as stubs so the surface is stable; they light up in M4–M6.
+Read-only (``doctor``, ``search``, ``list``, ``status``), lifecycle (``rent``,
+``destroy``, ``reap``), provisioning (``serve``, ``provision``, ``ssh``,
+``logs``) and the pipeline (``connect``, ``bench``, ``publish``, ``run``).
 """
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ from bbvastl80.vast.models import Instance, Offer
 from bbvastl80.vast.offers import build_search_body, pick_offer
 from bbvastl80.vast.sshkeys import key_body, resolve_identity, resolve_public_key
 
-app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
+app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 SPEC_OPT = Annotated[Optional[str], typer.Option("--spec", "-s", help="Path to a run spec YAML")]
 YES_OPT = Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt")]
@@ -42,7 +41,35 @@ RUN_OPT = Annotated[Optional[str], typer.Option("--run", help="Target a run by i
 VERBOSE_OPT = Annotated[bool, typer.Option("--verbose", "-v", help="Verbose output")]
 
 
+MIN_BETTERBENCH = "0.5.0"
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"bbvastl80 {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: Annotated[
+        bool, typer.Option("--version", callback=_version_callback, is_eager=True,
+                           help="Print the version and exit")
+    ] = False,
+) -> None:
+    """Rent a Vast.ai GPU, run your stack on it, benchmark with BetterBench, publish with L80."""
+
+
 # --- shared helpers ----------------------------------------------------------
+def _version_at_least(text: str, minimum: str) -> bool:
+    """True when the first x.y.z in ``text`` is >= ``minimum``."""
+    import re
+
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    if not m:
+        return False
+    return tuple(map(int, m.groups())) >= tuple(map(int, minimum.split(".")))
+
 def _cfg() -> Config:
     return Config.load()
 
@@ -192,14 +219,17 @@ def doctor(verbose: VERBOSE_OPT = False) -> None:
         else:
             log.warn(f"{name}: not found on PATH")
 
-    # BetterBench version probe (the pin must be 0.4.0 for comparability)
+    # BetterBench version probe: results schema 2 (0.5.0 and later) is what L80 publishes
     bb = bins.get("betterbench")
     if bb:
         try:
             out = subprocess.run([bb, "--version"], capture_output=True, text=True, timeout=30)
             ver = (out.stdout or out.stderr).strip().splitlines()
             ver = ver[0] if ver else "unknown"
-            (log.success if "0.4.0" in ver else log.warn)(f"betterbench version: {ver}")
+            ok = _version_at_least(ver, MIN_BETTERBENCH)
+            (log.success if ok else log.warn)(
+                f"betterbench version: {ver}" + ("" if ok else f" (need >= {MIN_BETTERBENCH})")
+            )
         except (OSError, subprocess.SubprocessError) as e:
             log.warn(f"betterbench: could not probe version ({e})")
 

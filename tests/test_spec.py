@@ -26,12 +26,19 @@ def test_engine_spec_explicit():
         "model": {"id": "m", "source": "hf", "hf_repo": "r"},
         "serving": {
             "mode": "engine", "port": 8080,
-            "engine": {"engine": "sglang", "max_model_len": 4096},
+            "engine": {"engine": "llamacpp", "max_model_len": 4096},
         },
     })
-    assert s.serving.engine.engine == "sglang"
+    assert s.serving.engine.engine == "llamacpp"
     assert s.serving.engine.max_model_len == 4096
     assert s.serving.port == 8080
+
+
+@pytest.mark.parametrize("engine", ["sglang", "tgi", "ollama"])
+def test_engine_without_preset_is_rejected(engine):
+    with pytest.raises(ValidationError, match="has no preset yet"):
+        RunSpec(**{"name": "t", "model": {"id": "m"},
+                   "serving": {"engine": {"engine": engine}}})
 
 
 def test_custom_spec_requires_block():

@@ -3,9 +3,10 @@ hand on a results file where nothing succeeded.
 
 We shell out to ``$L80_BETTERBENCH run`` exactly as a human would, so the
 harness version stays the one pinned on this machine (comparability). The
-flags mirror ``betterbench run --help`` (0.4.0): ``--endpoint``, ``--model``,
+flags mirror ``betterbench run --help``: ``--endpoint``, ``--model``,
 ``--out``, ``--quick`` *or* ``--passes N`` / ``--warmup N``, phase flags, and
-repeatable ``--note k=v``.
+repeatable ``--note k=v``. They are unchanged from 0.4.0 through 0.6.1 (the
+version L80 pins).
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 # run.example.yaml — a fully-commented starter spec for bbvastl80.
 #
 # Two shapes are supported for `serving`:
-#   * mode: engine  — pick a preset (vllm/llamacpp/sglang/tgi/ollama); we do the rest
+#   * mode: engine  — pick a preset (vllm/llamacpp); we do the rest
 #   * mode: custom  — bring your own image + setup + start command
 #
 # Copy this to `run.yaml`, edit, then:

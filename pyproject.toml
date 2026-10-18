@@ -12,6 +12,9 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/launch80/BB-VAST-L80"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

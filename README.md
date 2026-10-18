@@ -27,8 +27,25 @@ return clean, actionable errors with a valid key).
 
 ## Install
 
+The easiest way is through the [L80 CLI](https://github.com/launch80/L80-CLI),
+which pins a release of this project and runs it for you (with
+[uv](https://docs.astral.sh/uv/) installed):
+
 ```bash
-cd BB-VAST-L80
+L80 vast doctor
+L80 vast run --spec run.yaml --max-hours 2
+```
+
+Or run it directly:
+
+```bash
+uvx --from git+https://github.com/launch80/BB-VAST-L80@v0.1.0 bbvastl80 --help
+```
+
+For development:
+
+```bash
+git clone https://github.com/launch80/BB-VAST-L80 && cd BB-VAST-L80
 uv venv && uv pip install -e ".[dev]"
 alias bbvastl80="$PWD/.venv/bin/bbvastl80"   # or add .venv/bin to PATH
 ```
@@ -46,16 +63,23 @@ bbvastl80 destroy --run <id>   # tear it down
 ```
 
 Create an API key at <https://cloud.vast.ai/manage-keys/> (scope:
-`instance_read`, `instance_write`). Put it in `.env` as `VAST_API_KEY=…` or in
-`~/.config/bbvastl80/credentials` as `api_key=…`.
+`instance_read`, `instance_write`). Put it in `~/.config/bbvastl80/credentials`
+(the bare key, or `api_key=…`) or export `VAST_API_KEY`; both work from any
+directory, including under `L80 vast`. A `.env` with `VAST_API_KEY=…` is also
+read, but only from the current directory.
+
+`bbvastl80` publishes through `L80` (or `l80`) on PATH; set `L80_BIN` to use
+another. BetterBench comes from `L80_BETTERBENCH` or PATH and must be 0.5.0 or
+later (results schema 2); L80 pins 0.6.1.
 
 ## The spec
 
 `run.example.yaml` is fully commented. Two shapes for `serving`:
 
-- **`mode: engine`** — pick a preset (`vllm`/`llamacpp`/`sglang`/`tgi`/`ollama`);
-  the app generates the install + launch for you. A minimal spec (just `model:`)
-  defaults to vLLM.
+- **`mode: engine`** — pick a preset (`vllm` or `llamacpp`); the app generates
+  the install + launch for you. A minimal spec (just `model:`) defaults to vLLM.
+  `sglang`, `tgi` and `ollama` are reserved names without a preset yet: the spec
+  rejects them, so use `mode: custom` for those stacks.
 - **`mode: custom`** — bring your own `image` + `setup` + `start` + `health`.
   This is the "offload *my* stack" path; the lean form is image + setup + start.
 
@@ -98,6 +122,11 @@ and provision time. `benchmark`/`publish`/`connect`/`lifecycle` round it out.
   healthy, a repair otherwise).
 - **Resumable + crash-safe.** Each run writes `runs/<id>/state.json`. Phases are
   idempotent; `destroy --run <id>` and `reap` work even after a crash.
+- **No watchdog if the process dies.** If `bbvastl80` is killed (closed
+  terminal, lost SSH session, power loss), the rented box keeps billing until
+  you run `destroy --run <id>` or `reap`. `L80 vast run --max-hours N` adds a
+  wall-clock watchdog that destroys the instance when time runs out, and
+  `L80 vast status` lists runs that may still be billing.
 - **The 404 trap.** Before publishing, we validate that at least one
   `single_stream[].ok` is true — a mis-`/v1` endpoint produces a full-size
   results file where every record is `ok: false`, and we must not publish that.
@@ -131,7 +160,7 @@ src/bbvastl80/
   publish.py        # spawn l80, parse the page URL
   run.py            # the pipeline + teardown policy + cost estimate
 specs/              # real run specs (e.g. 2x H200 NVL quick bench)
-tests/              # 83 tests: spec, offers, client (respx), instance, providers,
+tests/              # 89 tests: spec, offers, client (respx), instance, providers,
                     # bootstrap, sshkeys, connect, bench/publish, pipeline e2e
 run.example.yaml    # fully-commented starter spec
 ```
