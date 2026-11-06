@@ -87,6 +87,40 @@ later (results schema 2); L80 pins 0.6.1.
 datacenter) with a `pick` policy (`cheapest`/`first`/index). `budget` caps spend
 and provision time. `benchmark`/`publish`/`connect`/`lifecycle` round it out.
 
+### Steps (0.2.0)
+
+`steps:` is the ordered list of operations a run performs on the box once it serves
+the model. Without it a run has one BetterBench step built from `benchmark`, as in 0.1.0.
+
+```yaml
+steps:
+  - type: betterbench          # speed: decode, prefill, concurrency
+    quick: true
+  - type: qualitybench         # quality: L80 qualitybench (pinned QualityBench)
+    label: baseline
+    quick: false
+    tasks: []                  # empty = the default suite
+    thinking: off              # on | off | omit for the server's default
+    # reference: ~/runs/bf16/results.json   # makes this a compare (its .qb/ folder beside it)
+    # thresholds: my-thresholds.md
+    deadline: 4h               # no new work after this; cut tasks are listed as partial
+    publish: true
+```
+
+- Steps run in order on this machine, against the box's endpoint through the tunnel.
+  Each writes to `runs/<run-id>/<NN>-<label>/`, so its outputs are local as soon as it
+  ends.
+- A failed step is recorded and the next one still runs. The run exits 1 if any step
+  failed, and every step's status, outputs and page URL are in `state.json`.
+- A `qualitybench` step needs Docker on this machine for its code tasks. With the default
+  suite, vLLM is started with `--max-logprobs 64`. Set `serving.engine.tool_call_parser`
+  for `bfcl`, and `serving.engine.reasoning_parser` for `thinking: on`.
+- Under L80's `--max-hours` watchdog (`BBVASTL80_DEADLINE`), a QualityBench step stops
+  starting work 15 minutes before the hard stop, so its results file is written before the
+  box is destroyed.
+- Each step change prints a line for L80's console:
+  `bbvastl80:step {"index":2,"type":"qualitybench","state":"done","results":"…","url":"…"}`.
+
 ## CLI
 
 | command   | what it does |
@@ -106,7 +140,7 @@ and provision time. `benchmark`/`publish`/`connect`/`lifecycle` round it out.
 | `connect` | resolve the endpoint (direct port or SSH tunnel) + verify `/v1` |
 | `bench`   | run pinned BetterBench against an endpoint → validated `results.json` |
 | `publish` | publish a `results.json` via the L80 CLI (validated first) |
-| `run`     | the full pipeline: rent → provision → connect → bench → publish → destroy (`--up-to`, `--dry-run`, `--keep`) |
+| `run`     | the full pipeline: rent → provision → connect → the spec's steps → destroy (`--up-to`, `--dry-run`, `--keep`) |
 
 ## Design notes
 
@@ -159,8 +193,15 @@ src/bbvastl80/
   bench.py          # spawn pinned BetterBench + validate_results (never publish zeros)
   publish.py        # spawn l80, parse the page URL
   run.py            # the pipeline + teardown policy + cost estimate
+  steps.py          # spec v2 steps: betterbench, qualitybench (via L80)
 specs/              # real run specs (e.g. 2x H200 NVL quick bench)
 tests/              # 89 tests: spec, offers, client (respx), instance, providers,
                     # bootstrap, sshkeys, connect, bench/publish, pipeline e2e
 run.example.yaml    # fully-commented starter spec
 ```
+
+## Community
+
+Questions, results, or a model you want tested? Join the Launch80 Discord: https://discord.gg/launch80
+
+If this work is useful to you, please support the server: https://launch80.com/supporter

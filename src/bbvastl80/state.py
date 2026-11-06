@@ -21,6 +21,21 @@ STATUS_PHASES = ["created", "searched", "rented", "provisioned", "connected",
                  "benchmarked", "published", "torn_down", "failed"]
 
 
+class StepState(BaseModel):
+    """One spec step's progress and outputs (spec v2)."""
+
+    index: int
+    type: str
+    label: str
+    status: str = "pending"  # pending | running | done | failed | skipped
+    results: str | None = None
+    report: str | None = None
+    url: str | None = None
+    error: str | None = None
+    started_at: float | None = None
+    ended_at: float | None = None
+
+
 class RunState(BaseModel):
     run_id: str
     created_at: float = Field(default_factory=time.time)
@@ -42,6 +57,7 @@ class RunState(BaseModel):
     # benchmark / publish
     results_path: str | None = None
     publish_url: str | None = None
+    steps: list[StepState] = Field(default_factory=list)
     # cost
     dph: float | None = None
     started_billing_at: float | None = None

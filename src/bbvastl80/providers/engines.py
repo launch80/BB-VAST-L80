@@ -42,7 +42,15 @@ class VLLMProvider(Provider):
             parts.append(f"--max-model-len {eng.max_model_len}")
         if eng.gpu_mem_util:
             parts.append(f"--gpu-memory-utilization {eng.gpu_mem_util}")
-        parts.extend(shlex.quote(a) for a in (eng.extra_args or []))
+        extra = list(eng.extra_args or [])
+        if eng.tool_call_parser and "--tool-call-parser" not in extra:
+            parts.append(f"--enable-auto-tool-choice --tool-call-parser {shlex.quote(eng.tool_call_parser)}")
+        if eng.reasoning_parser and "--reasoning-parser" not in extra:
+            parts.append(f"--reasoning-parser {shlex.quote(eng.reasoning_parser)}")
+        # QualityBench's logprobs task asks for the top 64 prompt logprobs.
+        if spec.needs_logprobs() and not any(a.startswith("--max-logprobs") for a in extra):
+            parts.append("--max-logprobs 64")
+        parts.extend(shlex.quote(a) for a in extra)
         return " ".join(parts)
 
 

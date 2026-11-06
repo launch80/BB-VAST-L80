@@ -653,7 +653,10 @@ def run(spec: SPEC_OPT = None,
         offer: OFFER_OPT = None,
         instance: INSTANCE_OPT = None,
         verbose: VERBOSE_OPT = False) -> None:
-    """The full pipeline: rent → provision → connect → bench → publish → destroy."""
+    """The full pipeline: rent → provision → connect → the spec's steps → destroy.
+
+    Exits 1 when any step failed (its error is in state.json and on the
+    ``bbvastl80:step`` line); the box is torn down either way."""
     cfg = _cfg()
     try:
         s = _spec(spec)
@@ -670,9 +673,13 @@ def run(spec: SPEC_OPT = None,
             _fail(str(e))
         except PipelineError as e:
             _fail(str(e))
-    log.success(f"run {state.run_id}: {state.status}"
-                + (f" · {state.publish_url}" if state.publish_url else "")
-                + (f" · results {state.results_path}" if state.results_path else ""))
+    log.success(f"run {state.run_id}: {state.status}")
+    for st in state.steps:
+        line = f"  {st.label}: {st.status}" + (f" · {st.url}" if st.url else "") + \
+            (f" · {st.results}" if st.results else "")
+        (log.success if st.status == "done" else log.warn)(line)
+    if any(st.status == "failed" for st in state.steps):
+        raise typer.Exit(1)
 
 
 def main() -> None:

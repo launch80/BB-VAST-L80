@@ -10,7 +10,7 @@ OpenAI-compatible ``/v1`` on ``port``* — so the downstream phases
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -63,6 +63,11 @@ class EngineServing(BaseModel):
     image: str | None = Field(None, description="override the preset's default image")
     max_model_len: int | None = None
     gpu_mem_util: float | None = Field(None, ge=0.1, le=1.0)
+    tool_call_parser: str | None = Field(
+        None, description="vLLM --tool-call-parser (enables auto tool choice); QualityBench's bfcl "
+                          "scores the server's own parser")
+    reasoning_parser: str | None = Field(
+        None, description="vLLM --reasoning-parser; needed for a qualitybench step with thinking: on")
     extra_args: list[str] = Field(default_factory=list)
 
     @field_validator("engine")
@@ -162,6 +167,58 @@ class BenchmarkSpec(BaseModel):
     notes: dict[str, str] = Field(default_factory=dict)
 
 
+# --- Steps (spec v2) ----------------------------------------------------------
+# A run is: rent -> provision -> connect -> each step in order -> reap. Steps run
+# on this machine against the box's endpoint (through the tunnel), so their
+# outputs are local the moment a step ends and a later failure cannot lose them.
+class BetterBenchStep(BaseModel):
+    type: Literal["betterbench"] = "betterbench"
+    quick: bool = False
+    passes: int = Field(20, ge=1)
+    warmup: int = Field(2, ge=0)
+    phases: list[Literal["decode", "prefill", "concurrency"]] = Field(
+        default_factory=lambda: ["decode", "prefill", "concurrency"]
+    )
+    notes: dict[str, str] = Field(default_factory=dict)
+    publish: bool = True
+
+
+QB_TASKS = ("gsm8k", "ifeval", "mmlu_pro", "humaneval", "mbpp", "bfcl", "lcb", "logprobs",
+            "needle", "spec_parity")
+QB_DEFAULT = tuple(t for t in QB_TASKS if t != "spec_parity")
+
+
+class QualityBenchStep(BaseModel):
+    """`L80 qualitybench` against the rented endpoint. A run with ``reference``
+    is a compare: the output is the reference's page with this run as an arm."""
+
+    type: Literal["qualitybench"]
+    label: str | None = Field(None, description="names the output folder and the page arm")
+    quick: bool = False
+    tasks: list[str] = Field(default_factory=list, description="empty => the default suite")
+    thinking: Literal["on", "off"] | None = None
+    reference: str | None = Field(None, description="a local results file (its .qb/ folder beside it)")
+    thresholds: str | None = None
+    deadline: str | None = Field(None, description="a duration such as 3h: no work starts after it")
+    tokenizer: str | None = Field(None, description="HF repo for logprobs/needle; null => model.hf_repo")
+    notes: dict[str, str] = Field(default_factory=dict)
+    publish: bool = True
+
+    @field_validator("tasks")
+    @classmethod
+    def _known_tasks(cls, v: list[str]) -> list[str]:
+        bad = [t for t in v if t not in QB_TASKS]
+        if bad:
+            raise ValueError(f"unknown qualitybench task(s) {', '.join(bad)}; known: {', '.join(QB_TASKS)}")
+        return v
+
+    def task_set(self) -> tuple[str, ...]:
+        return tuple(self.tasks) or QB_DEFAULT
+
+
+Step = Annotated[Union[BetterBenchStep, QualityBenchStep], Field(discriminator="type")]
+
+
 # --- Publish -----------------------------------------------------------------
 class PublishSpec(BaseModel):
     template: Literal["bench.betterbench.v1", "bench.report.v1"] = "bench.betterbench.v1"
@@ -209,6 +266,8 @@ class RunSpec(BaseModel):
     serving: ServingSpec = Field(default_factory=ServingSpec)
     instance: InstanceSpec = Field(default_factory=InstanceSpec)
     benchmark: BenchmarkSpec = Field(default_factory=BenchmarkSpec)
+    steps: list[Step] | None = Field(
+        None, description="ordered operations on the box; null => one betterbench step from `benchmark`")
     publish: PublishSpec = Field(default_factory=PublishSpec)
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
     connect: ConnectSpec = Field(default_factory=ConnectSpec)
@@ -232,7 +291,16 @@ class RunSpec(BaseModel):
     def _defaults(self) -> "RunSpec":
         if self.serving.model_id is None:
             self.serving.model_id = self.model.id
+        if self.steps is None:
+            b = self.benchmark
+            self.steps = [BetterBenchStep(quick=b.quick, passes=b.passes, warmup=b.warmup,
+                                          phases=list(b.phases), notes=dict(b.notes))]
+        if not self.steps:
+            raise ValueError("steps is empty: give at least one step, or leave it out for one betterbench step")
         return self
+
+    def needs_logprobs(self) -> bool:
+        return any(isinstance(s, QualityBenchStep) and "logprobs" in s.task_set() for s in self.steps or [])
 
 
 def load_spec(path: str | Path) -> RunSpec:
@@ -275,6 +343,9 @@ __all__ = [
     "WeightsSpec",
     "InstanceSpec",
     "BenchmarkSpec",
+    "BetterBenchStep",
+    "QualityBenchStep",
+    "Step",
     "PublishSpec",
     "BudgetSpec",
     "ConnectSpec",

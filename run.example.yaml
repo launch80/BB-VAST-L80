@@ -38,6 +38,8 @@ serving:
     # image: ghcr.io/vllm/vllm-openai:latest   # override the preset image
     max_model_len: 8192
     gpu_mem_util: 0.90
+    # tool_call_parser: hermes        # for a qualitybench step's bfcl task
+    # reasoning_parser: qwen3         # for a qualitybench step with thinking: on
     # extra_args: ["--tensor-parallel-size", "2"]
 
 # ---- OPTION B: your own custom stack (the "offload my setup" path) ---------
@@ -74,6 +76,20 @@ benchmark:
   notes:
     engine: vllm
     hardware: H100
+
+# ---- steps (0.2.0): ordered operations once the box serves the model ---------
+# Leave `steps` out for one BetterBench step built from `benchmark` above.
+# steps:
+#   - type: betterbench
+#     quick: true
+#   - type: qualitybench           # runs `L80 qualitybench` against the box
+#     label: baseline
+#     quick: true
+#     tasks: [gsm8k, ifeval, logprobs]   # empty/omitted = the default suite
+#     thinking: off
+#     # reference: ~/runs/bf16/results.json   # compare against an earlier run
+#     deadline: 3h
+#     publish: true
 
 publish:
   template: bench.betterbench.v1

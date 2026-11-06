@@ -18,13 +18,14 @@ import time
 from pathlib import Path
 
 from bbvastl80 import log
-from bbvastl80.bench import BenchError, run_bench, validate_results
+from bbvastl80.bench import BenchError
 from bbvastl80.bootstrap import provision, render_bootstrap
 from bbvastl80.config import Config, ConfigError
 from bbvastl80.connect import ConnectError, close_tunnel, connect
-from bbvastl80.publish import PublishError, run_publish
+from bbvastl80.publish import PublishError
 from bbvastl80.spec import RunSpec
 from bbvastl80.state import RunState, StateStore
+from bbvastl80.steps import run_steps
 from bbvastl80.vast.client import VastClient, VastError
 from bbvastl80.vast.instance import HostError, ProvisionError, rent as rent_box, wait_for_running
 from bbvastl80.vast.models import Instance, Offer
@@ -219,9 +220,11 @@ def dry_run(spec: RunSpec, c: VastClient) -> None:
              f"disk {spec.instance.disk_gb}GB, onstart {'bootstrap script' if bootstrap else 'none'}")
     if bootstrap:
         log.detail(bootstrap)
-    log.info(f"then: provision → connect ({spec.connect.mode}) → bench "
-             f"({'quick' if spec.benchmark.quick else f'{spec.benchmark.passes} passes'}) → "
-             f"publish ({spec.publish.template}{', dry-run' if spec.publish.dry_run else ''}) → "
+    from bbvastl80.steps import step_label
+    plan = " → ".join(step_label(i, st) + (" (quick)" if getattr(st, "quick", False) else "")
+                      + ("" if st.publish else " (no publish)") for i, st in enumerate(spec.steps or [], 1))
+    log.info(f"then: provision → connect ({spec.connect.mode}) → {plan}"
+             f"{' [publish dry-run]' if spec.publish.dry_run else ''} → "
              f"{'keep' if spec.lifecycle.keep_running else 'destroy'}")
 
 
@@ -280,26 +283,21 @@ def run_pipeline(cfg: Config, spec: RunSpec, c: VastClient, *, up_to: str | None
             keep_notice(state)
             return state
 
-        # --- bench ---
-        out = Path(cfg.runs_dir) / state.run_id / "results.json"
-        run_bench(cfg.betterbench_bin, spec, conn.endpoint, out)
-        summary = validate_results(out)
-        state.results_path = str(out)
-        state.status = "benchmarked"
+        # --- steps (bench and publish) ---
+        steps = run_steps(cfg, spec, conn.endpoint, store, state,
+                          publish=up_to != "bench", publish_dry_run=publish_dry_run)
+        first_bb = next((st for st in steps if st.type == "betterbench" and st.results), None)
+        if first_bb:  # v1 fields, for readers of state.json that predate steps
+            state.results_path, state.publish_url = first_bb.results, first_bb.url
+        failed = [st for st in steps if st.status == "failed"]
+        if len(failed) == len(steps):
+            raise BenchError("; ".join(f"{st.label}: {st.error}" for st in failed))
+        state.status = "published" if any(st.url for st in steps) else "benchmarked"
         store.save(state)
-        log.success(f"results: {out} · {summary}")
-        if stop_after("bench"):
-            keep_notice(state)
-            return state
-
-        # --- publish ---
-        url = run_publish(cfg.l80_bin, spec, out, dry_run=publish_dry_run)
-        if url:
-            state.publish_url = url
-            state.status = "published"
-            log.success(f"published: {url}")
-        store.save(state)
-        if stop_after("publish"):
+        if failed:
+            log.warn(f"{len(failed)} of {len(steps)} step(s) failed: "
+                     + "; ".join(f"{st.label}: {st.error}" for st in failed))
+        if up_to in ("bench", "publish"):
             keep_notice(state)
             return state
     except (ProvisionError, ConnectError, BenchError, PublishError, VastError, ConfigError) as e:
@@ -319,5 +317,5 @@ def run_pipeline(cfg: Config, spec: RunSpec, c: VastClient, *, up_to: str | None
             log.info(f"  tunnel:   ssh pid {state.tunnel_pid} (closed by destroy --run)")
         keep_notice(state)
     else:
-        teardown(c, store, state, reason="publish done, lifecycle.teardown=auto")
+        teardown(c, store, state, reason="steps done, lifecycle.teardown=auto")
     return state
