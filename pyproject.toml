@@ -1,6 +1,6 @@
 [project]
 name = "bbvastl80"
-version = "0.2.0"
+version = "0.2.1"
 description = "Rent a Vast.ai GPU, run your stack on it, benchmark with BetterBench, publish with L80."
 authors = [{ name = "launch80", email = "team@launch80.com" }]
 requires-python = ">=3.10"

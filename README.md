@@ -84,8 +84,12 @@ later (results schema 2); L80 pins 0.6.1.
   This is the "offload *my* stack" path; the lean form is image + setup + start.
 
 `gpu` filters any GPU (names, count, min RAM, $/hr ceiling, type, reliability,
-datacenter) with a `pick` policy (`cheapest`/`first`/index). `budget` caps spend
+download speed, datacenter) with a `pick` policy (`cheapest`/`first`/index). `budget` caps spend
 and provision time. `benchmark`/`publish`/`connect`/`lifecycle` round it out.
+
+A box that is not running within `budget.max_provision_min` (most often a host pulling the
+engine image slowly) is destroyed and the next offer is tried, unless the spec keeps boxes
+(`lifecycle.teardown: manual` or `keep_running`). `gpu.min_inet_down` (Mbps) avoids slow hosts.
 
 ### Steps (0.2.0)
 

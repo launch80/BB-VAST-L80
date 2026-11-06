@@ -19,6 +19,7 @@ gpu:
   type: ondemand                          # ondemand | bid | reserved
   verified: true
   min_reliability: 0.99
+  min_inet_down: 500                      # Mbps: the image + weights download must fit max_provision_min
   # datacenter: US                        # optional pin
   # geolocation: "United States"          # optional pin
   pick: cheapest                          # cheapest | first | <1-based index>

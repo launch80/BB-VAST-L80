@@ -184,3 +184,33 @@ def test_rent_fails_over_when_host_cannot_start_container(env, client, router):
     st = rp.run_pipeline(env["cfg"], spec(), client, up_to="rent")
     assert destroyed_777.called            # the dead box was torn down
     assert st.instance_id == 778 and st.offer_id == 12 and st.status == "rented"
+
+
+def test_box_that_never_starts_is_destroyed_and_the_next_offer_tried(env, client, router, monkeypatch):
+    from bbvastl80.vast.instance import ProvisionError
+    real = rp.wait_for_running
+
+    def wait(c, instance_id, timeout_min):
+        if instance_id == 777:
+            raise ProvisionError("instance 777 not running after 20 min (last status: loading)")
+        return real(c, instance_id, timeout_min=timeout_min)
+    monkeypatch.setattr(rp, "wait_for_running", wait)
+    good = dict(INSTANCE, id=778)
+    router.put(f"{BASE}/asks/12/").mock(
+        return_value=MockResponse(200, content=json.dumps({"success": True, "new_contract": 778})))
+    router.get(f"{BASE}/instances/778").mock(
+        return_value=MockResponse(200, content=json.dumps({"instances": good})))
+    router.post(f"{BASE}/instances/778/ssh/").mock(return_value=MockResponse(200, content="{}"))
+    st = rp.run_pipeline(env["cfg"], spec(), client, up_to="rent")
+    assert env["destroy"].called and st.instance_id == 778 and st.offer_id == 12
+
+
+def test_box_that_never_starts_is_kept_when_the_spec_keeps_boxes(env, client, monkeypatch):
+    from bbvastl80.vast.instance import ProvisionError
+
+    def wait(c, instance_id, timeout_min):
+        raise ProvisionError("not running after 20 min")
+    monkeypatch.setattr(rp, "wait_for_running", wait)
+    with pytest.raises(rp.PipelineError, match="still billing"):
+        rp.run_pipeline(env["cfg"], spec(lifecycle={"teardown": "manual"}), client, up_to="rent")
+    assert not env["destroy"].called

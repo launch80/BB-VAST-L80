@@ -77,3 +77,10 @@ def test_build_search_body_disk_and_rentable():
     assert body["gpu_name"] == {"eq": "H200 NVL"}
     assert body["disk_space"] == {"gte": 120.0}
     assert body["rentable"] == {"eq": True}
+
+
+def test_min_inet_down_filters_slow_hosts():
+    from bbvastl80.spec import GPUFilter
+    from bbvastl80.vast.offers import build_search_body
+    body = build_search_body(GPUFilter(min_inet_down=500))
+    assert body["inet_down"] == {"gte": 500}

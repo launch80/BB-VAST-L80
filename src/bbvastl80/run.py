@@ -115,10 +115,25 @@ def rent_phase(cfg: Config, spec: RunSpec, c: VastClient, offer_id: int | None,
             state.status, state.instance_id = "host_error", None
             store.save(state)
         except ProvisionError as e:
-            state.status = "failed"
+            # It never started (most often a slow image pull). It bills anyway, so
+            # destroy it and try the next offer, unless the spec keeps boxes.
+            last_err = e
+            if spec.lifecycle.keep_running or spec.lifecycle.teardown == "manual":
+                state.status = "failed"
+                store.save(state)
+                raise PipelineError(f"{e}\n(the instance may still be starting and is still billing; "
+                                    f"re-check with `bbvastl80 status --instance {instance_id}`, or "
+                                    f"`bbvastl80 destroy --instance {instance_id}`)") from e
+            log.warn(f"{e}\n  destroying {instance_id} and trying the next offer")
+            try:
+                c.destroy_instance(instance_id)
+                state.status, state.instance_id = "start_timeout", None
+            except VastError as de:
+                state.status = "failed"
+                store.save(state)
+                raise PipelineError(f"{e}; could not destroy {instance_id}: {de} — run "
+                                    f"`bbvastl80 destroy --instance {instance_id} --yes`") from e
             store.save(state)
-            raise PipelineError(f"{e}\n(the instance may still be starting; re-check with "
-                                f"`bbvastl80 status --instance {instance_id}`)") from e
     if chosen is None or inst is None or state.instance_id is None:
         state.status = "failed"
         store.save(state)

@@ -29,6 +29,9 @@ class GPUFilter(BaseModel):
     type: Literal["ondemand", "bid", "reserved"] | None = None
     verified: bool | None = None
     min_reliability: float | None = Field(None, ge=0.0, le=1.0)
+    min_inet_down: float | None = Field(
+        None, ge=0, description="min download speed, Mbps: the engine image and weights come down at "
+                                "this rate, and a slow host can miss max_provision_min")
     datacenter: str | None = None
     geolocation: str | None = None
     pick: str = Field("cheapest", description="cheapest | first | <1-based index>")
