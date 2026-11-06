@@ -6,6 +6,7 @@ Read-only (``doctor``, ``search``, ``list``, ``status``), lifecycle (``rent``,
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Annotated, Optional
@@ -259,7 +260,9 @@ def search(spec: SPEC_OPT = None, verbose: VERBOSE_OPT = False) -> None:
 
 
 @app.command(name="list")
-def list_cmd(verbose: VERBOSE_OPT = False) -> None:
+def list_cmd(verbose: VERBOSE_OPT = False,
+             as_json: Annotated[bool, typer.Option("--json", help="Print a JSON array (id, status, label, dph).")] = False
+             ) -> None:
     """List all instances on the account."""
     cfg = _cfg()
     with _client(cfg) as c:
@@ -269,6 +272,11 @@ def list_cmd(verbose: VERBOSE_OPT = False) -> None:
             _fail(str(e))
         except VastError as e:
             _fail(f"list failed: {e}")
+    if as_json:
+        # L80 checks its local run records against this, so a destroyed box is never reported as billing.
+        print(json.dumps([{"id": i.id, "status": i.status, "label": i.label,
+                           "dph": getattr(i, "dph_total", None)} for i in instances]))
+        return
     if not instances:
         log.info("no instances")
         return
